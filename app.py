@@ -177,6 +177,7 @@ def exportar():
             cw.writerow([s['data'],s['cliente'],s['telefone'],s['moto'],s['placa'],s['km'],s['mecanico'],s['descricao_servico'],s['pecas_usadas'],s['valor_total'],s['forma_pagamento']])
     return Response(si.getvalue(), mimetype="text/csv", headers={"Content-Disposition":"attachment;filename=historico.csv"})
 
+init_db()
+
 if __name__ == '__main__':
-    init_db()
     app.run(host='0.0.0.0', port=5000, debug=True)
