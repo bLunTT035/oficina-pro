@@ -1,7 +1,8 @@
 import os
 from datetime import datetime
-from flask import Flask, render_template_string, request, redirect
+from flask import Flask, render_template_string, request, redirect, send_file
 import sqlite3
+from io import BytesIO
 
 app = Flask(__name__)
 DATABASE_URL = os.environ.get('DATABASE_URL')
@@ -28,7 +29,8 @@ def init_db():
         cur.execute('CREATE TABLE IF NOT EXISTS produtos (id SERIAL PRIMARY KEY, nome TEXT, preco REAL, estoque INTEGER)')
         cur.execute('CREATE TABLE IF NOT EXISTS servicos (id SERIAL PRIMARY KEY, cliente TEXT, carro TEXT, descricao TEXT, valor REAL, data TEXT, placa TEXT, veiculo TEXT, produtos_usados TEXT)')
         for col in ["cliente","carro","placa","veiculo","descricao","valor","data","produtos_usados"]:
-            cur.execute(f'ALTER TABLE servicos ADD COLUMN IF NOT EXISTS {col} TEXT')
+            try: cur.execute(f'ALTER TABLE servicos ADD COLUMN IF NOT EXISTS {col} TEXT')
+            except: pass
     else:
         cur.execute('CREATE TABLE IF NOT EXISTS produtos (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT, preco REAL, estoque INTEGER)')
         cur.execute('CREATE TABLE IF NOT EXISTS servicos (id INTEGER PRIMARY KEY AUTOINCREMENT, cliente TEXT, placa TEXT, veiculo TEXT, carro TEXT, descricao TEXT, valor REAL, data TEXT, produtos_usados TEXT)')
@@ -53,11 +55,6 @@ def buscar_servicos(filtro=""):
             id_, cliente, placa, veiculo, carro, descricao, valor, data, prod = r
         else:
             id_=r['id']; cliente=r['cliente']; placa=r['placa']; veiculo=r['veiculo']; carro=r['carro']; descricao=r['descricao']; valor=r['valor']; data=r['data']; prod=r['produtos_usados']
-        # Corrige bagunça antiga
-        if not data or "/" not in str(data):
-            # Se data não parece data, troca
-            data = str(carro or data or "")
-            carro = ""
         lista.append({"id":id_, "cliente":cliente or "", "placa":placa or "", "veiculo":veiculo or carro or "", "descricao":descricao or "", "valor":valor or 0, "data":data or "", "prod":prod or ""})
     return lista
 
@@ -83,16 +80,30 @@ body{background:#0e0e0e;color:#fff;font-family:Inter,Arial}
 </head><body>
 <nav class="navbar d-flex justify-content-between">
 <div class="fw-bold">OFICINA PRO - NA NUVEM</div>
-<div class="d-flex gap-2">
+<div class="d-flex gap-2 flex-wrap">
 <a href="/" class="btn btn-dark2 btn-sm">Início</a>
 <a href="/produtos" class="btn btn-dark2 btn-sm">Produtos</a>
 <a href="/historico" class="btn btn-dark2 btn-sm">Histórico</a>
+<a href="/exportar_excel" class="btn btn-dark2 btn-sm">Excel</a>
 <a href="/nova_os" class="btn btn-yellow btn-sm">+ Nova OS</a>
 </div>
 </nav>
 <div class="container py-4" style="max-width:950px">{{content|safe}}</div>
 <script>
-function toggleProd(el){el.classList.toggle('selected');const cb=el.querySelector('input[type=checkbox]');cb.checked=!cb.checked;}
+function toggleProd(el){
+  el.classList.toggle('selected');
+  const cb=el.querySelector('input[type=checkbox]');
+  cb.checked=!cb.checked;
+  calcTotal();
+}
+function calcTotal(){
+  let total = parseFloat(document.getElementById('valor_mao').value) || 0;
+  document.querySelectorAll('.produto-item.selected').forEach(item=>{
+    total += parseFloat(item.dataset.preco) || 0;
+  });
+  document.getElementById('valor_total').value = total.toFixed(2);
+  document.getElementById('valor_display').innerText = 'R$ ' + total.toFixed(2);
+}
 </script>
 </body></html>
 """
@@ -111,17 +122,17 @@ def index():
     servicos = buscar_servicos()[:8]
     linhas=""
     for s in servicos:
-        linhas+=f"<tr><td>{s['data']}</td><td><b>{s['cliente']}</b><br><span class='small-label'>{s['veiculo']} {s['placa']}</span></td><td>{s['descricao']}<br><span class='small-label' style='color:#f7b500'>{s['prod']}</span></td><td><a href='/editar_servico/{s['id']}' class='btn btn-sm btn-dark2'>✏️</a> <a href='/excluir_servico/{s['id']}' class='btn btn-sm btn-danger'>🗑️</a></td></tr>"
+        linhas+=f"<tr><td>{s['data']}</td><td><b>{s['cliente']}</b><br><span class='small-label'>{s['veiculo']} {s['placa']}</span></td><td>{s['descricao']}<br><span class='small-label' style='color:#f7b500'>{s['prod']}</span></td><td>R$ {float(s['valor']):.2f}</td><td><a href='/imprimir/{s['id']}' target='_blank' class='btn btn-sm btn-dark2'>🖨️</a> <a href='/editar_servico/{s['id']}' class='btn btn-sm btn-dark2'>✏️</a> <a href='/excluir_servico/{s['id']}' class='btn btn-sm btn-danger'>🗑️</a></td></tr>"
     html = f"""
     <div class="row g-3">
       <div class="col-6"><div class="card-dark p-4"><div class="big-number">{total_serv}</div><div class="small-label mt-2">Serviços</div></div></div>
       <div class="col-6"><div class="card-dark p-4"><div class="big-number">R$ {float(faturado):.2f}</div><div class="small-label mt-2">Faturado</div></div></div>
       <div class="col-6"><div class="card-dark p-4"><div class="big-number">{total_prod}</div><div class="small-label mt-2">Produtos</div></div></div>
-      <div class="col-6"><div class="card-dark p-4 d-flex align-items-center justify-content-center"><a href="/nova_os" class="btn btn-yellow w-100 py-3">+ REGISTRAR SERVIÇO</a></div></div>
+      <div class="col-6"><div class="card-dark p-4 d-flex flex-column gap-2"><a href="/nova_os" class="btn btn-yellow w-100 py-3">+ REGISTRAR SERVIÇO</a><a href="/exportar_excel" class="btn btn-dark2 w-100">📊 Exportar Excel</a></div></div>
     </div>
     <div class="card-dark p-4 mt-4">
       <h6 class="fw-bold mb-3">Últimos Serviços</h6>
-      <table class="table"><thead><tr><th>Data</th><th>Cliente</th><th>Feito</th><th>Ações</th></tr></thead><tbody>{linhas if linhas else '<tr><td colspan=4 class=small-label>Nenhum serviço</td></tr>'}</tbody></table>
+      <table class="table"><thead><tr><th>Data</th><th>Cliente</th><th>Feito</th><th>Valor</th><th>Ações</th></tr></thead><tbody>{linhas if linhas else '<tr><td colspan=5 class=small-label>Nenhum serviço</td></tr>'}</tbody></table>
     </div>
     """
     return render_template_string(BASE, content=html)
@@ -174,7 +185,7 @@ def nova_os():
     cur.execute("SELECT * FROM produtos WHERE estoque > 0 ORDER BY nome ASC"); produtos = cur.fetchall()
     if request.method == 'POST':
         cliente = request.form.get('cliente',''); placa = request.form.get('placa',''); veiculo = request.form.get('veiculo','')
-        descricao = request.form.get('descricao',''); valor = request.form.get('valor','0') or 0
+        descricao = request.form.get('descricao',''); valor = request.form.get('valor_total','0') or 0
         selecionados = request.form.getlist('produtos')
         data = datetime.now().strftime("%d/%m/%Y %H:%M")
         nomes_usados=[]
@@ -190,7 +201,7 @@ def nova_os():
                     else: cur.execute("UPDATE produtos SET estoque = estoque - 1 WHERE id=?", (int(pid),))
             except: pass
         prod_txt = ", ".join(nomes_usados)
-        desc_final = f"{descricao} | Produtos: {prod_txt}" if prod_txt else descricao
+        desc_final = f"{descricao}"
         carro_full = f"{veiculo} - {placa}".strip(" -")
         if USE_POSTGRES: cur.execute("INSERT INTO servicos (cliente, carro, placa, veiculo, descricao, valor, data, produtos_usados) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)", (cliente, carro_full, placa, veiculo, desc_final, valor, data, prod_txt))
         else: cur.execute("INSERT INTO servicos (cliente, placa, veiculo, carro, descricao, valor, data, produtos_usados) VALUES (?,?,?,?,?,?,?,?)", (cliente, placa, veiculo, carro_full, desc_final, valor, data, prod_txt))
@@ -198,31 +209,32 @@ def nova_os():
     lista_prod_html=""
     for r in produtos:
         id_, nome, preco, est = (r[0], r[1], r[2], r[3]) if USE_POSTGRES else (r['id'], r['nome'], r['preco'], r['estoque'])
-        lista_prod_html += f"""<div class="produto-item" onclick="toggleProd(this)"><div><input type="checkbox" name="produtos" value="{id_}" style="display:none"><b>{nome}</b><br><span class="small-label">R$ {float(preco or 0):.2f} - Est: {est}</span></div><span class="small-label">✓</span></div>"""
+        lista_prod_html += f"""<div class="produto-item" data-preco="{float(preco or 0)}" onclick="toggleProd(this)"><div><input type="checkbox" name="produtos" value="{id_}" style="display:none"><b>{nome}</b><br><span class="small-label">R$ {float(preco or 0):.2f} - Est: {est}</span></div><span class="small-label">✓</span></div>"""
     if not lista_prod_html: lista_prod_html = "<div class='small-label'>Nenhum produto em estoque.</div>"
     conn.close()
     html = f"""
     <div class="card-dark p-4">
-    <h5 class="fw-bold mb-3">+ Nova OS</h5>
+    <h5 class="fw-bold mb-3">+ Nova OS - Cálculo Automático</h5>
     <form method="POST">
       <div class="row g-3">
         <div class="col-md-6"><label class="small-label">Cliente *</label><input name="cliente" class="form-control bg-dark text-white border-secondary" required></div>
         <div class="col-md-3"><label class="small-label">Placa</label><input name="placa" class="form-control bg-dark text-white border-secondary"></div>
         <div class="col-md-3"><label class="small-label">Veículo</label><input name="veiculo" class="form-control bg-dark text-white border-secondary"></div>
         <div class="col-12"><label class="small-label">O que foi feito *</label><textarea name="descricao" rows="3" class="form-control bg-dark text-white border-secondary" required></textarea></div>
-        <div class="col-md-4"><label class="small-label">Valor R$</label><input name="valor" type="number" step="0.01" class="form-control bg-dark text-white border-secondary"></div>
+        <div class="col-md-4"><label class="small-label">Mão de Obra R$</label><input id="valor_mao" type="number" step="0.01" class="form-control bg-dark text-white border-secondary" placeholder="0.00" oninput="calcTotal()"></div>
+        <div class="col-md-4"><label class="small-label">Total Automático</label><input id="valor_total" name="valor_total" type="number" step="0.01" class="form-control bg-dark text-white border-secondary" style="border-color:#f7b500!important;font-weight:bold" readonly><div id="valor_display" class="small-label mt-1" style="color:#f7b500">R$ 0.00</div></div>
       </div>
-      <div class="mt-4"><label class="small-label fw-bold">Produtos usados</label><div class="mt-2" style="max-height:300px;overflow-y:auto">{lista_prod_html}</div></div>
-      <button class="btn btn-yellow w-100 py-2 mt-4">SALVAR SERVIÇO</button>
+      <div class="mt-4"><label class="small-label fw-bold">Produtos usados (clica que soma no total automaticamente)</label><div class="mt-2" style="max-height:300px;overflow-y:auto">{lista_prod_html}</div></div>
+      <button class="btn btn-yellow w-100 py-2 mt-4">SALVAR SERVIÇO - <span id="valor_display2">R$ 0.00</span></button>
     </form>
     </div>
+    <script>function calcTotal(){{let t=parseFloat(document.getElementById('valor_mao').value)||0;document.querySelectorAll('.produto-item.selected').forEach(i=>{{t+=parseFloat(i.dataset.preco)||0}});document.getElementById('valor_total').value=t.toFixed(2);document.getElementById('valor_display').innerText='R$ '+t.toFixed(2);document.getElementById('valor_display2').innerText='R$ '+t.toFixed(2);}}</script>
     """
     return render_template_string(BASE, content=html)
 
 @app.route('/editar_servico/<int:id>', methods=['GET','POST'])
 def editar_servico(id):
     conn = get_conn(); cur = conn.cursor()
-    cur.execute("SELECT id, cliente, placa, veiculo, carro, descricao, valor, data, produtos_usados FROM servicos WHERE id=%s" % id if USE_POSTGRES and False else "SELECT id, cliente, placa, veiculo, carro, descricao, valor, data, produtos_usados FROM servicos WHERE id=%s" if USE_POSTGRES else "SELECT id, cliente, placa, veiculo, carro, descricao, valor, data, produtos_usados FROM servicos WHERE id=?", (id,) if USE_POSTGRES else (id,))
     if USE_POSTGRES: cur.execute("SELECT id, cliente, placa, veiculo, carro, descricao, valor, data, produtos_usados FROM servicos WHERE id=%s", (id,))
     else: cur.execute("SELECT id, cliente, placa, veiculo, carro, descricao, valor, data, produtos_usados FROM servicos WHERE id=?", (id,))
     r = cur.fetchone()
@@ -255,17 +267,65 @@ def historico():
     servicos = buscar_servicos(q)
     linhas=""
     for s in servicos:
-        linhas+=f"<tr><td>{s['data']}</td><td><b>{s['cliente']}</b><br><span class='small-label'>{s['veiculo']} {s['placa']}</span></td><td>{s['descricao']}<br><span class='small-label' style='color:#f7b500'>{s['prod']}</span></td><td>R$ {float(s['valor'] or 0):.2f}</td><td><a href='/editar_servico/{s['id']}' class='btn btn-sm btn-dark2'>✏️</a> <a href='/excluir_servico/{s['id']}' class='btn btn-sm btn-danger'>🗑️</a></td></tr>"
+        linhas+=f"<tr><td>{s['data']}</td><td><b>{s['cliente']}</b><br><span class='small-label'>{s['veiculo']} {s['placa']}</span></td><td>{s['descricao']}<br><span class='small-label' style='color:#f7b500'>{s['prod']}</span></td><td>R$ {float(s['valor'] or 0):.2f}</td><td><a href='/imprimir/{s['id']}' target='_blank' class='btn btn-sm btn-dark2'>🖨️</a> <a href='/editar_servico/{s['id']}' class='btn btn-sm btn-dark2'>✏️</a> <a href='/excluir_servico/{s['id']}' class='btn btn-sm btn-danger'>🗑️</a></td></tr>"
     html = f"""
     <div class="card-dark p-4">
-    <h5 class="fw-bold mb-3">Histórico Completo</h5>
+    <div class="d-flex justify-content-between align-items-center mb-3"><h5 class="fw-bold m-0">Histórico Completo</h5><a href="/exportar_excel" class="btn btn-yellow btn-sm">📊 Excel</a></div>
     <form method="GET" class="mb-3">
-      <div class="input-group"><input name="q" value="{q}" class="form-control bg-dark text-white border-secondary" placeholder="Pesquisar por cliente, placa, veículo ou serviço..."><button class="btn btn-yellow">Buscar</button></div>
+      <div class="input-group"><input name="q" value="{q}" class="form-control bg-dark text-white border-secondary" placeholder="Pesquisar cliente, placa..."><button class="btn btn-yellow">Buscar</button></div>
     </form>
-    <table class="table"><thead><tr><th>Data</th><th>Cliente / Veículo</th><th>Feito / Produtos</th><th>Valor</th><th>Ações</th></tr></thead><tbody>{linhas if linhas else '<tr><td colspan=5 class=small-label>Nenhum resultado</td></tr>'}</tbody></table>
+    <table class="table"><thead><tr><th>Data</th><th>Cliente</th><th>Feito</th><th>Valor</th><th>Ações</th></tr></thead><tbody>{linhas if linhas else '<tr><td colspan=5 class=small-label>Nenhum resultado</td></tr>'}</tbody></table>
     </div>
     """
     return render_template_string(BASE, content=html)
+
+@app.route('/exportar_excel')
+def exportar_excel():
+    servicos = buscar_servicos()
+    try:
+        import openpyxl
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Serviços"
+        ws.append(["Data","Cliente","Placa","Veículo","Descrição","Produtos Usados","Valor"])
+        for s in servicos:
+            ws.append([s['data'], s['cliente'], s['placa'], s['veiculo'], s['descricao'], s['prod'], float(s['valor'] or 0)])
+        bio = BytesIO()
+        wb.save(bio)
+        bio.seek(0)
+        return send_file(bio, as_attachment=True, download_name=f"oficina_{datetime.now().strftime('%d-%m-%Y')}.xlsx", mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    except:
+        output = "Data,Cliente,Placa,Veiculo,Descricao,Produtos,Valor\n"
+        for s in servicos:
+            output += f"\"{s['data']}\",\"{s['cliente']}\",\"{s['placa']}\",\"{s['veiculo']}\",\"{s['descricao']}\",\"{s['prod']}\",{s['valor']}\n"
+        bio = BytesIO(output.encode('utf-8'))
+        return send_file(bio, as_attachment=True, download_name="oficina.csv", mimetype="text/csv")
+
+@app.route('/imprimir/<int:id>')
+def imprimir(id):
+    conn = get_conn(); cur = conn.cursor()
+    if USE_POSTGRES: cur.execute("SELECT id, cliente, placa, veiculo, carro, descricao, valor, data, produtos_usados FROM servicos WHERE id=%s", (id,))
+    else: cur.execute("SELECT id, cliente, placa, veiculo, carro, descricao, valor, data, produtos_usados FROM servicos WHERE id=?", (id,))
+    r = cur.fetchone()
+    conn.close()
+    if not r: return "OS não encontrada"
+    if USE_POSTGRES:
+        s = {"id":r[0], "cliente":r[1], "placa":r[2], "veiculo":r[3], "descricao":r[5], "valor":r[6], "data":r[7], "prod":r[8]}
+    else:
+        s = {"id":r['id'], "cliente":r['cliente'], "placa":r['placa'], "veiculo":r['veiculo'], "descricao":r['descricao'], "valor":r['valor'], "data":r['data'], "prod":r['produtos_usados']}
+    html_print = f"""
+    <!doctype html><html><head><meta charset="utf-8"><title>OS #{s['id']}</title>
+    <style>body{{font-family:Arial;padding:30px}}.header{{border-bottom:3px solid #f7b500;padding-bottom:15px;margin-bottom:20px}}.box{{border:1px solid #ddd;padding:15px;border-radius:8px;margin-bottom:15px}}.btn{{background:#f7b500;color:#000;padding:10px 20px;border:none;border-radius:6px;font-weight:bold;cursor:pointer}} @media print{{.no-print{{display:none}}}}</style>
+    </head><body>
+    <div class="header"><h2>OFICINA PRO - ORDEM DE SERVIÇO #{s['id']}</h2><p>Data: {s['data']}</p></div>
+    <div class="box"><b>Cliente:</b> {s['cliente']}<br><b>Veículo:</b> {s['veiculo']}<br><b>Placa:</b> {s['placa']}</div>
+    <div class="box"><b>Serviço Executado:</b><br>{s['descricao']}<br><br><b>Produtos Usados:</b> {s['prod']}</div>
+    <div class="box"><h3>Valor Total: R$ {float(s['valor'] or 0):.2f}</h3></div>
+    <div class="box" style="margin-top:40px"><br><br>Assinatura do Cliente: ___________________________________<br><br><br>Assinatura da Oficina: __________________________________</div>
+    <div class="no-print" style="margin-top:20px"><button class="btn" onclick="window.print()">🖨️ IMPRIMIR / SALVAR EM PDF</button> <a href="/historico" class="btn" style="background:#333;color:#fff;text-decoration:none">Voltar</a></div>
+    </body></html>
+    """
+    return html_print
 
 if __name__ == '__main__':
     app.run(debug=True)
