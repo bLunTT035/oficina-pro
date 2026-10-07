@@ -27,19 +27,39 @@ def init_db():
     if USE_POSTGRES:
         cur.execute('CREATE TABLE IF NOT EXISTS produtos (id SERIAL PRIMARY KEY, nome TEXT, preco REAL, estoque INTEGER)')
         cur.execute('CREATE TABLE IF NOT EXISTS servicos (id SERIAL PRIMARY KEY, cliente TEXT, carro TEXT, descricao TEXT, valor REAL, data TEXT, placa TEXT, veiculo TEXT, produtos_usados TEXT)')
-        cur.execute('ALTER TABLE servicos ADD COLUMN IF NOT EXISTS cliente TEXT')
-        cur.execute('ALTER TABLE servicos ADD COLUMN IF NOT EXISTS carro TEXT')
-        cur.execute('ALTER TABLE servicos ADD COLUMN IF NOT EXISTS placa TEXT')
-        cur.execute('ALTER TABLE servicos ADD COLUMN IF NOT EXISTS veiculo TEXT')
-        cur.execute('ALTER TABLE servicos ADD COLUMN IF NOT EXISTS descricao TEXT')
-        cur.execute('ALTER TABLE servicos ADD COLUMN IF NOT EXISTS valor REAL')
-        cur.execute('ALTER TABLE servicos ADD COLUMN IF NOT EXISTS data TEXT')
-        cur.execute('ALTER TABLE servicos ADD COLUMN IF NOT EXISTS produtos_usados TEXT')
+        for col in ["cliente","carro","placa","veiculo","descricao","valor","data","produtos_usados"]:
+            cur.execute(f'ALTER TABLE servicos ADD COLUMN IF NOT EXISTS {col} TEXT')
     else:
         cur.execute('CREATE TABLE IF NOT EXISTS produtos (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT, preco REAL, estoque INTEGER)')
         cur.execute('CREATE TABLE IF NOT EXISTS servicos (id INTEGER PRIMARY KEY AUTOINCREMENT, cliente TEXT, placa TEXT, veiculo TEXT, carro TEXT, descricao TEXT, valor REAL, data TEXT, produtos_usados TEXT)')
     conn.commit()
     conn.close()
+
+def buscar_servicos(filtro=""):
+    conn = get_conn()
+    cur = conn.cursor()
+    if filtro:
+        if USE_POSTGRES:
+            cur.execute("SELECT id, cliente, placa, veiculo, carro, descricao, valor, data, produtos_usados FROM servicos WHERE cliente ILIKE %s OR placa ILIKE %s OR veiculo ILIKE %s OR descricao ILIKE %s ORDER BY id DESC", (f"%{filtro}%",f"%{filtro}%",f"%{filtro}%",f"%{filtro}%"))
+        else:
+            cur.execute("SELECT id, cliente, placa, veiculo, carro, descricao, valor, data, produtos_usados FROM servicos WHERE cliente LIKE? OR placa LIKE? OR veiculo LIKE? OR descricao LIKE? ORDER BY id DESC", (f"%{filtro}%",f"%{filtro}%",f"%{filtro}%",f"%{filtro}%"))
+    else:
+        cur.execute("SELECT id, cliente, placa, veiculo, carro, descricao, valor, data, produtos_usados FROM servicos ORDER BY id DESC")
+    rows = cur.fetchall()
+    conn.close()
+    lista=[]
+    for r in rows:
+        if USE_POSTGRES:
+            id_, cliente, placa, veiculo, carro, descricao, valor, data, prod = r
+        else:
+            id_=r['id']; cliente=r['cliente']; placa=r['placa']; veiculo=r['veiculo']; carro=r['carro']; descricao=r['descricao']; valor=r['valor']; data=r['data']; prod=r['produtos_usados']
+        # Corrige bagunça antiga
+        if not data or "/" not in str(data):
+            # Se data não parece data, troca
+            data = str(carro or data or "")
+            carro = ""
+        lista.append({"id":id_, "cliente":cliente or "", "placa":placa or "", "veiculo":veiculo or carro or "", "descricao":descricao or "", "valor":valor or 0, "data":data or "", "prod":prod or ""})
+    return lista
 
 BASE = """
 <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -50,9 +70,8 @@ body{background:#0e0e0e;color:#fff;font-family:Inter,Arial}
 .navbar{background:#000!important;border-bottom:3px solid #f7b500;padding:12px 15px}
 .card-dark{background:#1c1c1c;border:1px solid #2a2a2a;border-radius:12px}
 .btn-yellow{background:#f7b500;color:#000;font-weight:800;border-radius:8px;border:none}
-.btn-yellow:hover{background:#ffcc33;color:#000}
 .btn-dark2{background:#2a2a2a;color:#fff;border:none;border-radius:8px}
-.table{--bs-table-bg:#1c1c1c!important;--bs-table-color:#e0e0e0!important;--bs-table-striped-bg:#1c1c1c!important;--bs-table-hover-bg:#252525!important;background:#1c1c1c!important;margin:0}
+.table{--bs-table-bg:#1c1c1c!important;--bs-table-color:#e0e0e0!important;background:#1c1c1c!important;margin:0}
 .table > :not(caption) > * > *{background-color:#1c1c1c!important;color:#ddd!important;box-shadow:none!important;border-color:#222!important}
 .table thead th{background:#1c1c1c!important;color:#fff!important;border-bottom:1px solid #333!important}
 .table tbody td{background:#1c1c1c!important;color:#ddd!important;border-bottom:1px solid #222!important}
@@ -71,13 +90,9 @@ body{background:#0e0e0e;color:#fff;font-family:Inter,Arial}
 <a href="/nova_os" class="btn btn-yellow btn-sm">+ Nova OS</a>
 </div>
 </nav>
-<div class="container py-4" style="max-width:900px">{{content|safe}}</div>
+<div class="container py-4" style="max-width:950px">{{content|safe}}</div>
 <script>
-function toggleProd(el){
-  el.classList.toggle('selected');
-  const cb = el.querySelector('input[type=checkbox]');
-  cb.checked =!cb.checked;
-}
+function toggleProd(el){el.classList.toggle('selected');const cb=el.querySelector('input[type=checkbox]');cb.checked=!cb.checked;}
 </script>
 </body></html>
 """
@@ -92,15 +107,11 @@ def index():
     except: faturado=0
     try: cur.execute("SELECT COUNT(*) FROM produtos"); total_prod = cur.fetchone()[0]
     except: total_prod=0
-    cur.execute("SELECT * FROM servicos ORDER BY id DESC LIMIT 10"); rows = cur.fetchall(); conn.close()
+    conn.close()
+    servicos = buscar_servicos()[:8]
     linhas=""
-    for r in rows:
-        if USE_POSTGRES:
-            try: cliente, carro, data, desc = r[1], r[2], r[5], r[3]
-            except: cliente, desc, data, carro = r[1], r[2], r[4], ""
-        else:
-            cliente=r['cliente']; carro=r['carro'] if r['carro'] else (r['veiculo'] or ""); data=r['data']; desc=r['descricao']
-        linhas+=f"<tr><td>{data}</td><td><b>{cliente}</b><br><span class='small-label'>{carro}</span></td><td>{desc}</td></tr>"
+    for s in servicos:
+        linhas+=f"<tr><td>{s['data']}</td><td><b>{s['cliente']}</b><br><span class='small-label'>{s['veiculo']} {s['placa']}</span></td><td>{s['descricao']}<br><span class='small-label' style='color:#f7b500'>{s['prod']}</span></td><td><a href='/editar_servico/{s['id']}' class='btn btn-sm btn-dark2'>✏️</a> <a href='/excluir_servico/{s['id']}' class='btn btn-sm btn-danger'>🗑️</a></td></tr>"
     html = f"""
     <div class="row g-3">
       <div class="col-6"><div class="card-dark p-4"><div class="big-number">{total_serv}</div><div class="small-label mt-2">Serviços</div></div></div>
@@ -110,7 +121,7 @@ def index():
     </div>
     <div class="card-dark p-4 mt-4">
       <h6 class="fw-bold mb-3">Últimos Serviços</h6>
-      <table class="table"><thead><tr><th>Data</th><th>Cliente</th><th>Feito</th></tr></thead><tbody>{linhas if linhas else '<tr><td colspan=3 class=small-label>Nenhum serviço ainda</td></tr>'}</tbody></table>
+      <table class="table"><thead><tr><th>Data</th><th>Cliente</th><th>Feito</th><th>Ações</th></tr></thead><tbody>{linhas if linhas else '<tr><td colspan=4 class=small-label>Nenhum serviço</td></tr>'}</tbody></table>
     </div>
     """
     return render_template_string(BASE, content=html)
@@ -149,18 +160,21 @@ def excluir_produto(id):
     else: cur.execute("DELETE FROM produtos WHERE id=?", (id,))
     conn.commit(); conn.close(); return redirect('/produtos')
 
+@app.route('/excluir_servico/<int:id>')
+def excluir_servico(id):
+    conn = get_conn(); cur = conn.cursor()
+    if USE_POSTGRES: cur.execute("DELETE FROM servicos WHERE id=%s", (id,))
+    else: cur.execute("DELETE FROM servicos WHERE id=?", (id,))
+    conn.commit(); conn.close(); return redirect(request.referrer or '/')
+
 @app.route('/nova_os', methods=['GET','POST'])
 def nova_os():
     init_db()
     conn = get_conn(); cur = conn.cursor()
     cur.execute("SELECT * FROM produtos WHERE estoque > 0 ORDER BY nome ASC"); produtos = cur.fetchall()
-
     if request.method == 'POST':
-        cliente = request.form.get('cliente','')
-        placa = request.form.get('placa','')
-        veiculo = request.form.get('veiculo','')
-        descricao = request.form.get('descricao','')
-        valor = request.form.get('valor','0') or 0
+        cliente = request.form.get('cliente',''); placa = request.form.get('placa',''); veiculo = request.form.get('veiculo','')
+        descricao = request.form.get('descricao',''); valor = request.form.get('valor','0') or 0
         selecionados = request.form.getlist('produtos')
         data = datetime.now().strftime("%d/%m/%Y %H:%M")
         nomes_usados=[]
@@ -178,39 +192,57 @@ def nova_os():
         prod_txt = ", ".join(nomes_usados)
         desc_final = f"{descricao} | Produtos: {prod_txt}" if prod_txt else descricao
         carro_full = f"{veiculo} - {placa}".strip(" -")
-        if USE_POSTGRES:
-            try: cur.execute("INSERT INTO servicos (cliente, carro, placa, veiculo, descricao, valor, data, produtos_usados) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)", (cliente, carro_full, placa, veiculo, desc_final, valor, data, prod_txt))
-            except: cur.execute("INSERT INTO servicos (cliente, carro, descricao, valor, data) VALUES (%s,%s,%s,%s,%s)", (cliente, carro_full, desc_final, valor, data))
+        if USE_POSTGRES: cur.execute("INSERT INTO servicos (cliente, carro, placa, veiculo, descricao, valor, data, produtos_usados) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)", (cliente, carro_full, placa, veiculo, desc_final, valor, data, prod_txt))
         else: cur.execute("INSERT INTO servicos (cliente, placa, veiculo, carro, descricao, valor, data, produtos_usados) VALUES (?,?,?,?,?,?,?,?)", (cliente, placa, veiculo, carro_full, desc_final, valor, data, prod_txt))
         conn.commit(); conn.close(); return redirect('/')
-
     lista_prod_html=""
     for r in produtos:
         id_, nome, preco, est = (r[0], r[1], r[2], r[3]) if USE_POSTGRES else (r['id'], r['nome'], r['preco'], r['estoque'])
-        lista_prod_html += f"""
-        <div class="produto-item" onclick="toggleProd(this)">
-          <div><input type="checkbox" name="produtos" value="{id_}" style="display:none"><b>{nome}</b><br><span class="small-label">R$ {float(preco or 0):.2f} - Estoque: {est}</span></div>
-          <span class="small-label">✓</span>
-        </div>
-        """
-    if not lista_prod_html: lista_prod_html = "<div class='small-label'>Nenhum produto em estoque. Cadastre em Produtos.</div>"
+        lista_prod_html += f"""<div class="produto-item" onclick="toggleProd(this)"><div><input type="checkbox" name="produtos" value="{id_}" style="display:none"><b>{nome}</b><br><span class="small-label">R$ {float(preco or 0):.2f} - Est: {est}</span></div><span class="small-label">✓</span></div>"""
+    if not lista_prod_html: lista_prod_html = "<div class='small-label'>Nenhum produto em estoque.</div>"
     conn.close()
     html = f"""
     <div class="card-dark p-4">
     <h5 class="fw-bold mb-3">+ Nova OS</h5>
     <form method="POST">
       <div class="row g-3">
-        <div class="col-md-6"><label class="small-label">Cliente *</label><input name="cliente" class="form-control bg-dark text-white border-secondary" placeholder="Nome" required></div>
-        <div class="col-md-3"><label class="small-label">Placa</label><input name="placa" class="form-control bg-dark text-white border-secondary" placeholder="ABC1234"></div>
-        <div class="col-md-3"><label class="small-label">Veículo</label><input name="veiculo" class="form-control bg-dark text-white border-secondary" placeholder="Onix LTZ"></div>
-        <div class="col-12"><label class="small-label">O que foi feito *</label><textarea name="descricao" rows="3" class="form-control bg-dark text-white border-secondary" placeholder="Descreva o serviço" required></textarea></div>
-        <div class="col-md-4"><label class="small-label">Valor R$</label><input name="valor" type="number" step="0.01" class="form-control bg-dark text-white border-secondary" placeholder="0.00"></div>
+        <div class="col-md-6"><label class="small-label">Cliente *</label><input name="cliente" class="form-control bg-dark text-white border-secondary" required></div>
+        <div class="col-md-3"><label class="small-label">Placa</label><input name="placa" class="form-control bg-dark text-white border-secondary"></div>
+        <div class="col-md-3"><label class="small-label">Veículo</label><input name="veiculo" class="form-control bg-dark text-white border-secondary"></div>
+        <div class="col-12"><label class="small-label">O que foi feito *</label><textarea name="descricao" rows="3" class="form-control bg-dark text-white border-secondary" required></textarea></div>
+        <div class="col-md-4"><label class="small-label">Valor R$</label><input name="valor" type="number" step="0.01" class="form-control bg-dark text-white border-secondary"></div>
       </div>
-      <div class="mt-4">
-        <label class="small-label fw-bold">Produtos usados (clique para marcar - vai descontando do estoque)</label>
-        <div class="mt-2" style="max-height:300px;overflow-y:auto">{lista_prod_html}</div>
-      </div>
+      <div class="mt-4"><label class="small-label fw-bold">Produtos usados</label><div class="mt-2" style="max-height:300px;overflow-y:auto">{lista_prod_html}</div></div>
       <button class="btn btn-yellow w-100 py-2 mt-4">SALVAR SERVIÇO</button>
+    </form>
+    </div>
+    """
+    return render_template_string(BASE, content=html)
+
+@app.route('/editar_servico/<int:id>', methods=['GET','POST'])
+def editar_servico(id):
+    conn = get_conn(); cur = conn.cursor()
+    cur.execute("SELECT id, cliente, placa, veiculo, carro, descricao, valor, data, produtos_usados FROM servicos WHERE id=%s" % id if USE_POSTGRES and False else "SELECT id, cliente, placa, veiculo, carro, descricao, valor, data, produtos_usados FROM servicos WHERE id=%s" if USE_POSTGRES else "SELECT id, cliente, placa, veiculo, carro, descricao, valor, data, produtos_usados FROM servicos WHERE id=?", (id,) if USE_POSTGRES else (id,))
+    if USE_POSTGRES: cur.execute("SELECT id, cliente, placa, veiculo, carro, descricao, valor, data, produtos_usados FROM servicos WHERE id=%s", (id,))
+    else: cur.execute("SELECT id, cliente, placa, veiculo, carro, descricao, valor, data, produtos_usados FROM servicos WHERE id=?", (id,))
+    r = cur.fetchone()
+    if not r: conn.close(); return redirect('/')
+    s = {"id":r[0] if USE_POSTGRES else r['id'], "cliente":r[1] if USE_POSTGRES else r['cliente'], "placa":r[2] if USE_POSTGRES else r['placa'], "veiculo":r[3] if USE_POSTGRES else r['veiculo'], "descricao":r[5] if USE_POSTGRES else r['descricao'], "valor":r[6] if USE_POSTGRES else r['valor']}
+    if request.method == 'POST':
+        if USE_POSTGRES: cur.execute("UPDATE servicos SET cliente=%s, placa=%s, veiculo=%s, descricao=%s, valor=%s WHERE id=%s", (request.form['cliente'], request.form['placa'], request.form['veiculo'], request.form['descricao'], request.form['valor'], id))
+        else: cur.execute("UPDATE servicos SET cliente=?, placa=?, veiculo=?, descricao=?, valor=? WHERE id=?", (request.form['cliente'], request.form['placa'], request.form['veiculo'], request.form['descricao'], request.form['valor'], id))
+        conn.commit(); conn.close(); return redirect('/historico')
+    conn.close()
+    html = f"""
+    <div class="card-dark p-4">
+    <h5 class="fw-bold mb-3">Editar OS #{s['id']}</h5>
+    <form method="POST" class="row g-3">
+      <div class="col-md-6"><label class="small-label">Cliente</label><input name="cliente" value="{s['cliente']}" class="form-control bg-dark text-white border-secondary" required></div>
+      <div class="col-md-3"><label class="small-label">Placa</label><input name="placa" value="{s['placa']}" class="form-control bg-dark text-white border-secondary"></div>
+      <div class="col-md-3"><label class="small-label">Veículo</label><input name="veiculo" value="{s['veiculo']}" class="form-control bg-dark text-white border-secondary"></div>
+      <div class="col-12"><label class="small-label">O que foi feito</label><textarea name="descricao" rows="3" class="form-control bg-dark text-white border-secondary" required>{s['descricao']}</textarea></div>
+      <div class="col-md-4"><label class="small-label">Valor</label><input name="valor" type="number" step="0.01" value="{s['valor']}" class="form-control bg-dark text-white border-secondary"></div>
+      <div class="col-12"><button class="btn btn-yellow w-100">SALVAR EDIÇÃO</button></div>
     </form>
     </div>
     """
@@ -219,20 +251,18 @@ def nova_os():
 @app.route('/historico')
 def historico():
     init_db()
-    conn = get_conn(); cur = conn.cursor()
-    cur.execute("SELECT * FROM servicos ORDER BY id DESC"); rows = cur.fetchall(); conn.close()
+    q = request.args.get('q','')
+    servicos = buscar_servicos(q)
     linhas=""
-    for r in rows:
-        if USE_POSTGRES:
-            try: cliente=r[1]; veiculo=r[3] or ""; placa=r[6] or "" if len(r)>6 else ""; desc=r[4] if len(r)>6 else r[3]; valor=r[5] if len(r)>6 else r[4]; data=r[7] if len(r)>7 else r[5]; prod=r[8] if len(r)>8 else ""
-            except: cliente=r[1]; desc=r[2]; valor=0; data=r[4]; veiculo=""; placa=""; prod=""
-        else: cliente=r['cliente']; placa=r['placa']; veiculo=r['veiculo']; desc=r['descricao']; valor=r['valor']; data=r['data']; prod=r['produtos_usados']
-        info_veiculo = f"{veiculo} {placa}".strip()
-        linhas+=f"<tr><td>{data}</td><td><b>{cliente}</b><br><span class='small-label'>{info_veiculo}</span></td><td>{desc}<br><span class='small-label' style='color:#f7b500'>{prod}</span></td><td>R$ {float(valor or 0):.2f}</td></tr>"
+    for s in servicos:
+        linhas+=f"<tr><td>{s['data']}</td><td><b>{s['cliente']}</b><br><span class='small-label'>{s['veiculo']} {s['placa']}</span></td><td>{s['descricao']}<br><span class='small-label' style='color:#f7b500'>{s['prod']}</span></td><td>R$ {float(s['valor'] or 0):.2f}</td><td><a href='/editar_servico/{s['id']}' class='btn btn-sm btn-dark2'>✏️</a> <a href='/excluir_servico/{s['id']}' class='btn btn-sm btn-danger'>🗑️</a></td></tr>"
     html = f"""
     <div class="card-dark p-4">
     <h5 class="fw-bold mb-3">Histórico Completo</h5>
-    <table class="table"><thead><tr><th>Data</th><th>Cliente / Veículo</th><th>Feito / Produtos</th><th>Valor</th></tr></thead><tbody>{linhas}</tbody></table>
+    <form method="GET" class="mb-3">
+      <div class="input-group"><input name="q" value="{q}" class="form-control bg-dark text-white border-secondary" placeholder="Pesquisar por cliente, placa, veículo ou serviço..."><button class="btn btn-yellow">Buscar</button></div>
+    </form>
+    <table class="table"><thead><tr><th>Data</th><th>Cliente / Veículo</th><th>Feito / Produtos</th><th>Valor</th><th>Ações</th></tr></thead><tbody>{linhas if linhas else '<tr><td colspan=5 class=small-label>Nenhum resultado</td></tr>'}</tbody></table>
     </div>
     """
     return render_template_string(BASE, content=html)
