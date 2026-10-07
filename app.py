@@ -3,6 +3,7 @@ from datetime import datetime
 from flask import Flask, render_template_string, request, redirect, send_file
 import sqlite3
 from io import BytesIO
+import re
 
 app = Flask(__name__)
 DATABASE_URL = os.environ.get('DATABASE_URL')
@@ -147,7 +148,6 @@ def produtos():
       <div class="col-md-2"><button class="btn btn-yellow w-100">+ Add</button></div>
     </form>
     <table class="table"><thead><tr><th>Nome</th><th>Preço</th><th>Est</th><th>Ações</th></tr></thead><tbody>{linhas}</tbody></table>
-    <div class="small-label mt-3">NOVO: Clique no ✏️ para editar quantidade e preço</div>
     </div>
     """
     return render_template_string(BASE, content=html)
@@ -296,29 +296,136 @@ def nova_os():
 
 @app.route('/editar_servico/<int:id>', methods=['GET','POST'])
 def editar_servico(id):
+    init_db()
     conn = get_conn(); cur = conn.cursor()
     if USE_POSTGRES: cur.execute("SELECT id, cliente, placa, veiculo, carro, descricao, valor, data, produtos_usados FROM servicos WHERE id=%s", (id,))
     else: cur.execute("SELECT id, cliente, placa, veiculo, carro, descricao, valor, data, produtos_usados FROM servicos WHERE id=?", (id,))
     r = cur.fetchone()
     if not r: conn.close(); return redirect('/')
-    s = {"id":r[0] if USE_POSTGRES else r['id'], "cliente":r[1] if USE_POSTGRES else r['cliente'], "placa":r[2] if USE_POSTGRES else r['placa'], "veiculo":r[3] if USE_POSTGRES else r['veiculo'], "descricao":r[5] if USE_POSTGRES else r['descricao'], "valor":r[6] if USE_POSTGRES else r['valor']}
+    if USE_POSTGRES:
+        s_id, s_cliente, s_placa, s_veiculo, s_carro, s_desc, s_valor, s_data, s_prod = r
+    else:
+        s_id=r['id']; s_cliente=r['cliente']; s_placa=r['placa']; s_veiculo=r['veiculo']; s_carro=r['carro']; s_desc=r['descricao']; s_valor=r['valor']; s_data=r['data']; s_prod=r['produtos_usados']
+
+    produtos_existentes = {}
+    if s_prod:
+        for part in s_prod.split(','):
+            part=part.strip()
+            if not part: continue
+            m = re.match(r'(\d+)x\s+(.+)', part, re.I)
+            if m:
+                produtos_existentes[m.group(2).strip().upper()] = int(m.group(1))
+            else:
+                produtos_existentes[part.strip().upper()] = 1
+
     if request.method == 'POST':
-        if USE_POSTGRES: cur.execute("UPDATE servicos SET cliente=%s, placa=%s, veiculo=%s, descricao=%s, valor=%s WHERE id=%s", (request.form['cliente'], request.form['placa'], request.form['veiculo'], request.form['descricao'], request.form['valor'], id))
-        else: cur.execute("UPDATE servicos SET cliente=?, placa=?, veiculo=?, descricao=?, valor=? WHERE id=?", (request.form['cliente'], request.form['placa'], request.form['veiculo'], request.form['descricao'], request.form['valor'], id))
+        cliente = request.form.get('cliente','')
+        placa = request.form.get('placa','')
+        veiculo = request.form.get('veiculo','')
+        descricao = request.form.get('descricao','')
+        valor = request.form.get('valor_total') or request.form.get('valor') or 0
+        selecionados = request.form.getlist('produtos')
+        nomes_usados=[]
+        for pid in selecionados:
+            try:
+                qty = int(request.form.get(f'qty_{pid}', '1') or 1)
+                if qty < 1: qty=1
+                if USE_POSTGRES: cur.execute("SELECT nome FROM produtos WHERE id=%s", (int(pid),))
+                else: cur.execute("SELECT nome FROM produtos WHERE id=?", (int(pid),))
+                prow = cur.fetchone()
+                if prow:
+                    nome_p = prow[0] if USE_POSTGRES else prow['nome']
+                    nomes_usados.append(f"{qty}x {nome_p}" if qty>1 else nome_p)
+            except: pass
+        prod_txt = ", ".join(nomes_usados)
+        if USE_POSTGRES: cur.execute("UPDATE servicos SET cliente=%s, placa=%s, veiculo=%s, descricao=%s, valor=%s, produtos_usados=%s WHERE id=%s", (cliente, placa, veiculo, descricao, valor, prod_txt, id))
+        else: cur.execute("UPDATE servicos SET cliente=?, placa=?, veiculo=?, descricao=?, valor=?, produtos_usados=? WHERE id=?", (cliente, placa, veiculo, descricao, valor, prod_txt, id))
         conn.commit(); conn.close(); return redirect('/historico')
+
+    cur.execute("SELECT * FROM produtos ORDER BY nome ASC")
+    produtos_all = cur.fetchall()
     conn.close()
+
+    lista_prod_html=""
+    for prod_r in produtos_all:
+        pid, nome, preco, est = (prod_r[0], prod_r[1], prod_r[2], prod_r[3]) if USE_POSTGRES else (prod_r['id'], prod_r['nome'], prod_r['preco'], prod_r['estoque'])
+        nome_up = nome.strip().upper()
+        ja_usado = nome_up in produtos_existentes
+        qty_atual = produtos_existentes.get(nome_up, 1)
+        selected_class = "selected" if ja_usado else ""
+        checked_attr = "checked" if ja_usado else ""
+        display_qty = "flex" if ja_usado else "none"
+        lista_prod_html += f"""
+        <div class="produto-item {selected_class}" id="item-{pid}" data-preco="{float(preco or 0)}" onclick="toggleProd({pid})">
+          <div><input type="checkbox" name="produtos" value="{pid}" id="chk-{pid}" style="display:none" {checked_attr}><b>{nome}</b><br><span class="small-label">R$ {float(preco or 0):.2f} - Est: {est}</span></div>
+          <div style="display:flex; align-items:center; gap:8px;">
+            <div class="qty-box" id="qtybox-{pid}" style="display:{display_qty}" onclick="event.stopPropagation()">
+              <button type="button" class="qty-btn" onclick="changeQty({pid},-1)">-</button>
+              <input type="number" id="qty-{pid}" name="qty_{pid}" value="{qty_atual}" min="1" oninput="calcTotal()" onclick="event.stopPropagation()">
+              <button type="button" class="qty-btn" onclick="changeQty({pid},1)">+</button>
+            </div>
+            <span class="small-label">✓</span>
+          </div>
+        </div>
+        """
+    if not lista_prod_html:
+        lista_prod_html = "<div class='small-label'>Nenhum produto cadastrado.</div>"
+
     html = f"""
     <div class="card-dark p-4">
-    <h5 class="fw-bold mb-3">Editar OS #{s['id']}</h5>
-    <form method="POST" class="row g-3">
-      <div class="col-md-6"><label class="small-label">Cliente</label><input name="cliente" value="{s['cliente']}" class="form-control bg-dark text-white border-secondary" required></div>
-      <div class="col-md-3"><label class="small-label">Placa</label><input name="placa" value="{s['placa']}" class="form-control bg-dark text-white border-secondary"></div>
-      <div class="col-md-3"><label class="small-label">Veículo</label><input name="veiculo" value="{s['veiculo']}" class="form-control bg-dark text-white border-secondary"></div>
-      <div class="col-12"><label class="small-label">O que foi feito</label><textarea name="descricao" rows="3" class="form-control bg-dark text-white border-secondary" required>{s['descricao']}</textarea></div>
-      <div class="col-md-4"><label class="small-label">Valor</label><input name="valor" type="number" step="0.01" value="{s['valor']}" class="form-control bg-dark text-white border-secondary"></div>
-      <div class="col-12"><button class="btn btn-yellow w-100">SALVAR EDIÇÃO</button></div>
+    <h5 class="fw-bold mb-3">Editar OS #{s_id} - Editar Quantidade</h5>
+    <form method="POST">
+      <div class="row g-3">
+        <div class="col-md-6"><label class="small-label">Cliente</label><input name="cliente" value="{s_cliente}" class="form-control bg-dark text-white border-secondary" required></div>
+        <div class="col-md-3"><label class="small-label">Placa</label><input name="placa" value="{s_placa}" class="form-control bg-dark text-white border-secondary"></div>
+        <div class="col-md-3"><label class="small-label">Veículo</label><input name="veiculo" value="{s_veiculo or s_carro or ''}" class="form-control bg-dark text-white border-secondary"></div>
+        <div class="col-12"><label class="small-label">O que foi feito</label><textarea name="descricao" rows="3" class="form-control bg-dark text-white border-secondary" required>{s_desc}</textarea></div>
+        <div class="col-md-4"><label class="small-label">Mão de Obra R$</label><input id="valor_mao" type="number" step="0.01" class="form-control bg-dark text-white border-secondary" placeholder="0.00" oninput="calcTotal()"></div>
+        <div class="col-md-4"><label class="small-label">Total Automático</label><input id="valor_total" name="valor_total" type="number" step="0.01" value="{s_valor}" class="form-control bg-dark text-white border-secondary" style="border-color:#f7b500!important;font-weight:bold" readonly><div id="valor_display" class="small-label mt-1" style="color:#f7b500">R$ {float(s_valor or 0):.2f}</div></div>
+      </div>
+      <div class="mt-4"><label class="small-label fw-bold">Produtos usados (já marcado o que foi usado, pode mudar quantidade)</label><div class="mt-2" style="max-height:380px;overflow-y:auto">{lista_prod_html}</div></div>
+      <button class="btn btn-yellow w-100 py-3 mt-4">SALVAR EDIÇÃO - <span id="valor_display2">R$ {float(s_valor or 0):.2f}</span></button>
+      <a href="/historico" class="btn btn-dark2 w-100 mt-2">Cancelar</a>
     </form>
     </div>
+    <script>
+    function toggleProd(id){{
+      const el=document.getElementById('item-'+id);
+      const chk=document.getElementById('chk-'+id);
+      const qtybox=document.getElementById('qtybox-'+id);
+      el.classList.toggle('selected');
+      chk.checked = el.classList.contains('selected');
+      qtybox.style.display = chk.checked? 'flex' : 'none';
+      if(!chk.checked){{ document.getElementById('qty-'+id).value=1; }}
+      calcTotal();
+    }}
+    function changeQty(id, delta){{
+      const inp=document.getElementById('qty-'+id);
+      let v=parseInt(inp.value)||1;
+      v+=delta;
+      if(v<1) v=1;
+      inp.value=v;
+      calcTotal();
+    }}
+    function calcTotal(){{
+      let t=parseFloat(document.getElementById('valor_mao').value)||0;
+      document.querySelectorAll('.produto-item.selected').forEach(item=>{{
+        const id=item.id.replace('item-','');
+        const preco=parseFloat(item.dataset.preco)||0;
+        const qty=parseInt(document.getElementById('qty-'+id).value)||1;
+        t+=preco*qty;
+      }});
+      const totalInput = document.getElementById('valor_total');
+      if(t>0 || document.querySelectorAll('.produto-item.selected').length>0 || document.getElementById('valor_mao').value){{
+        totalInput.value=t.toFixed(2);
+        document.getElementById('valor_display').innerText='R$ '+t.toFixed(2);
+        document.getElementById('valor_display2').innerText='R$ '+t.toFixed(2);
+      }} else {{
+        totalInput.value=t.toFixed(2);
+      }}
+    }}
+    calcTotal();
+    </script>
     """
     return render_template_string(BASE, content=html)
 
@@ -390,4 +497,4 @@ def imprimir(id):
     return html_print
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
