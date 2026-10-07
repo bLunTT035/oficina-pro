@@ -1,6 +1,6 @@
 import os
 from datetime import datetime
-from flask import Flask, render_template_string, request, redirect, g
+from flask import Flask, render_template_string, request, redirect
 import sqlite3
 
 app = Flask(__name__)
@@ -48,15 +48,13 @@ BASE = """
 body{background:#f0f2f5}
 .navbar{background:#0d1b2a!important}
 .card{border:none;border-radius:15px;box-shadow:0 4px 15px rgba(0,0,0,.1)}
-.btn-edit{background:#0d6efd;color:#fff}
-.btn-del{background:#dc3545;color:#fff}
 .table thead{background:#0d1b2a;color:#fff}
 </style>
 </head>
 <body>
 <nav class="navbar navbar-dark navbar-expand-lg px-3">
   <a class="navbar-brand fw-bold" href="/">🔧 Oficina Pro</a>
-  <div class="navbar-nav flex-row gap-3">
+  <div class="navbar-nav flex-row gap-3 ms-3">
     <a class="nav-link text-white" href="/">Dashboard</a>
     <a class="nav-link text-white" href="/produtos">Produtos</a>
     <a class="nav-link text-white" href="/clientes">Clientes</a>
@@ -85,13 +83,6 @@ def index():
     """
     return render_template_string(BASE, content=html)
 
-def render_table(title, form_html, header_html, rows_html):
-    return f"""
-    <h3 class="mb-3">{title}</h3>
-    <div class="card p-3 mb-3">{form_html}</div>
-    <div class="card p-3"><table class="table table-hover"><thead><tr>{header_html}</tr></thead><tbody>{rows_html}</tbody></table></div>
-    """
-
 @app.route('/produtos', methods=['GET','POST'])
 def produtos():
     init_db()
@@ -105,10 +96,13 @@ def produtos():
     cur.execute("SELECT * FROM produtos ORDER BY id DESC"); rows = cur.fetchall(); conn.close()
     linhas=""
     for r in rows:
-        id_, nome, preco, est = (r[0], r[1], r[2], r[3]) if USE_POSTGRES else (r['id'], r['nome'], r['preco'], r['estoque'])
-        linhas+=f"<tr><td>{id_}</td><td>{nome}</td><td>R$ {float(preco):.2f}</td><td>{est}</td><td><a href='/editar_produto/{id_}' class='btn btn-sm btn-edit'>Editar</a> <a href='/excluir_produto/{id_}' class='btn btn-sm btn-del' onclick=\"return confirm('Excluir {nome}?')\">Excluir</a></td></tr>"
+        if USE_POSTGRES:
+            id_, nome, preco, est = r[0], r[1], r[2], r[3]
+        else:
+            id_, nome, preco, est = r['id'], r['nome'], r['preco'], r['estoque']
+        linhas+=f"<tr><td>{id_}</td><td>{nome}</td><td>R$ {float(preco):.2f}</td><td>{est}</td><td><a href='/editar_produto/{id_}' class='btn btn-sm btn-primary'>Editar</a> <a href='/excluir_produto/{id_}' class='btn btn-sm btn-danger' onclick=\"return confirm('Excluir?')\">Excluir</a></td></tr>"
     form='<form method="POST" class="row g-2"><div class="col-md-4"><input name="nome" class="form-control" placeholder="Nome do produto" required></div><div class="col-md-3"><input name="preco" type="number" step="0.01" class="form-control" placeholder="Preço" required></div><div class="col-md-3"><input name="estoque" type="number" class="form-control" placeholder="Estoque" required></div><div class="col-md-2"><button class="btn btn-primary w-100">+ Adicionar</button></div></form>'
-    html = render_table("📦 Produtos", form, "<th>ID</th><th>Nome</th><th>Preço</th><th>Estoque</th><th>Ações</th>", linhas)
+    html = f"""<h3 class="mb-3">📦 Produtos</h3><div class="card p-3 mb-3">{form}</div><div class="card p-3"><table class="table table-hover"><thead><tr><th>ID</th><th>Nome</th><th>Preço</th><th>Estoque</th><th>Ações</th></tr></thead><tbody>{linhas}</tbody></table></div>"""
     return render_template_string(BASE, content=html)
 
 @app.route('/editar_produto/<int:id>', methods=['GET','POST'])
@@ -120,11 +114,13 @@ def editar_produto(id):
         else:
             cur.execute("UPDATE produtos SET nome=?, preco=?, estoque=? WHERE id=?", (request.form['nome'], request.form['preco'], request.form['estoque'], id))
         conn.commit(); conn.close(); return redirect('/produtos')
-    cur.execute("SELECT * FROM produtos WHERE id=%s" % id if USE_POSTGRES else "SELECT * FROM produtos WHERE id=?", (id,) if not USE_POSTGRES else (id,))
+
     if USE_POSTGRES:
-        cur.execute("SELECT * FROM produtos WHERE id=%s", (id,)); r=cur.fetchone(); id_, nome, preco, est = r[0], r[1], r[2], r[3]
+        cur.execute("SELECT * FROM produtos WHERE id=%s", (id,)); r=cur.fetchone()
+        id_, nome, preco, est = r[0], r[1], r[2], r[3]
     else:
-        cur.execute("SELECT * FROM produtos WHERE id=?", (id,)); r=cur.fetchone(); id_, nome, preco, est = r['id'], r['nome'], r['preco'], r['estoque']
+        cur.execute("SELECT * FROM produtos WHERE id=?", (id,)); r=cur.fetchone()
+        id_, nome, preco, est = r['id'], r['nome'], r['preco'], r['estoque']
     conn.close()
     html = f"""
     <h3>Editar Produto</h3>
@@ -132,7 +128,7 @@ def editar_produto(id):
     <div class="col-md-6"><label>Nome</label><input name="nome" value="{nome}" class="form-control" required></div>
     <div class="col-md-3"><label>Preço</label><input name="preco" value="{preco}" type="number" step="0.01" class="form-control" required></div>
     <div class="col-md-3"><label>Estoque</label><input name="estoque" value="{est}" type="number" class="form-control" required></div>
-    <div class="col-12"><button class="btn btn-primary">Salvar Alterações</button> <a href="/produtos" class="btn btn-secondary">Cancelar</a></div>
+    <div class="col-12"><button class="btn btn-primary">Salvar</button> <a href="/produtos" class="btn btn-secondary">Cancelar</a></div>
     </form></div>
     """
     return render_template_string(BASE, content=html)
@@ -140,12 +136,12 @@ def editar_produto(id):
 @app.route('/excluir_produto/<int:id>')
 def excluir_produto(id):
     conn = get_conn(); cur = conn.cursor()
-    cur.execute("DELETE FROM produtos WHERE id=%s" % id if USE_POSTGRES and False else "DELETE FROM produtos WHERE id=%s" if USE_POSTGRES else "DELETE FROM produtos WHERE id=?", (id,) if not USE_POSTGRES else (id,))
     if USE_POSTGRES:
         cur.execute("DELETE FROM produtos WHERE id=%s", (id,))
     else:
         cur.execute("DELETE FROM produtos WHERE id=?", (id,))
-    conn.commit(); conn.close(); return redirect('/produtos')
+    conn.commit(); conn.close()
+    return redirect('/produtos')
 
 @app.route('/clientes', methods=['GET','POST'])
 def clientes():
@@ -158,9 +154,15 @@ def clientes():
             cur.execute("INSERT INTO clientes (nome, telefone, carro) VALUES (?,?,?)", (request.form['nome'], request.form['telefone'], request.form['carro']))
         conn.commit(); conn.close(); return redirect('/clientes')
     cur.execute("SELECT * FROM clientes ORDER BY id DESC"); rows = cur.fetchall(); conn.close()
-    linhas="".join([f"<tr><td>{r[0] if USE_POSTGRES else r['id']}</td><td>{r[1] if USE_POSTGRES else r['nome']}</td><td>{r[2] if USE_POSTGRES else r['telefone']}</td><td>{r[3] if USE_POSTGRES else r['carro']}</td></tr>" for r in rows])
+    linhas=""
+    for r in rows:
+        if USE_POSTGRES:
+            id_, n, t, ca = r[0], r[1], r[2], r[3]
+        else:
+            id_, n, t, ca = r['id'], r['nome'], r['telefone'], r['carro']
+        linhas+=f"<tr><td>{id_}</td><td>{n}</td><td>{t}</td><td>{ca}</td></tr>"
     form='<form method="POST" class="row g-2"><div class="col-md-4"><input name="nome" class="form-control" placeholder="Nome" required></div><div class="col-md-3"><input name="telefone" class="form-control" placeholder="Telefone"></div><div class="col-md-3"><input name="carro" class="form-control" placeholder="Carro"></div><div class="col-md-2"><button class="btn btn-primary w-100">+ Salvar</button></div></form>'
-    html = render_table("👥 Clientes", form, "<th>ID</th><th>Nome</th><th>Telefone</th><th>Carro</th>", linhas)
+    html = f"""<h3 class="mb-3">👥 Clientes</h3><div class="card p-3 mb-3">{form}</div><div class="card p-3"><table class="table"><thead><tr><th>ID</th><th>Nome</th><th>Telefone</th><th>Carro</th></tr></thead><tbody>{linhas}</tbody></table></div>"""
     return render_template_string(BASE, content=html)
 
 @app.route('/servicos', methods=['GET','POST'])
@@ -175,9 +177,15 @@ def servicos():
             cur.execute("INSERT INTO servicos (cliente, descricao, valor, data) VALUES (?,?,?,?)", (request.form['cliente'], request.form['descricao'], request.form['valor'], data))
         conn.commit(); conn.close(); return redirect('/servicos')
     cur.execute("SELECT * FROM servicos ORDER BY id DESC"); rows = cur.fetchall(); conn.close()
-    linhas="".join([f"<tr><td>{r[0] if USE_POSTGRES else r['id']}</td><td>{r[1] if USE_POSTGRES else r['cliente']}</td><td>{r[2] if USE_POSTGRES else r['descricao']}</td><td>R$ {float(r[3] if USE_POSTGRES else r['valor']):.2f}</td><td>{r[4] if USE_POSTGRES else r['data']}</td></tr>" for r in rows])
+    linhas=""
+    for r in rows:
+        if USE_POSTGRES:
+            id_, cli, desc, val, dat = r[0], r[1], r[2], r[3], r[4]
+        else:
+            id_, cli, desc, val, dat = r['id'], r['cliente'], r['descricao'], r['valor'], r['data']
+        linhas+=f"<tr><td>{id_}</td><td>{cli}</td><td>{desc}</td><td>R$ {float(val):.2f}</td><td>{dat}</td></tr>"
     form='<form method="POST" class="row g-2"><div class="col-md-3"><input name="cliente" class="form-control" placeholder="Cliente" required></div><div class="col-md-4"><input name="descricao" class="form-control" placeholder="Serviço" required></div><div class="col-md-3"><input name="valor" type="number" step="0.01" class="form-control" placeholder="Valor" required></div><div class="col-md-2"><button class="btn btn-primary w-100">+ Lançar</button></div></form>'
-    html = render_table("🛠️ Serviços", form, "<th>ID</th><th>Cliente</th><th>Descrição</th><th>Valor</th><th>Data</th>", linhas)
+    html = f"""<h3 class="mb-3">🛠️ Serviços</h3><div class="card p-3 mb-3">{form}</div><div class="card p-3"><table class="table"><thead><tr><th>ID</th><th>Cliente</th><th>Descrição</th><th>Valor</th><th>Data</th></tr></thead><tbody>{linhas}</tbody></table></div>"""
     return render_template_string(BASE, content=html)
 
 if __name__ == '__main__':
