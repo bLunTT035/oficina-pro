@@ -1,219 +1,393 @@
-from flask import Flask, render_template_string, request, redirect
 import os
 from datetime import datetime
+from flask import Flask, render_template_string, request, redirect, send_file
+import sqlite3
+from io import BytesIO
 
 app = Flask(__name__)
+DATABASE_URL = os.environ.get('DATABASE_URL')
+USE_POSTGRES = False
+if DATABASE_URL:
+    try:
+        import psycopg2
+        USE_POSTGRES = True
+    except:
+        USE_POSTGRES = False
 
-produtos_db = [
-    {"id": 1, "nome": "BATERIA MOURA 5AH", "preco": 260.00, "estoque": 5},
-    {"id": 2, "nome": "MONTAGEM RAIOS 4MM XRE300", "preco": 300.00, "estoque": 9},
-    {"id": 3, "nome": "FILTRO DE AR XRE 300", "preco": 60.00, "estoque": 0},
-    {"id": 4, "nome": "FILTRO COMBUSTIVEL XRE300", "preco": 90.00, "estoque": 2},
-    {"id": 5, "nome": "CALCO AJUSTE VARIOS", "preco": 60.00, "estoque": 19},
-    {"id": 6, "nome": "COXINS TP CABEÇOTE", "preco": 18.00, "estoque": 9},
-    {"id": 7, "nome": "JUNTA TP CABEÇOTE XRE300", "preco": 135.00, "estoque": 5},
-]
-ordens_db = []
+def get_conn():
+    if USE_POSTGRES:
+        return psycopg2.connect(DATABASE_URL, sslmode='require')
+    else:
+        conn = sqlite3.connect('oficina.db')
+        conn.row_factory = sqlite3.Row
+        return conn
 
-def next_id(lista):
-    return max([x["id"] for x in lista], default=0) + 1
+def init_db():
+    conn = get_conn()
+    cur = conn.cursor()
+    if USE_POSTGRES:
+        cur.execute('CREATE TABLE IF NOT EXISTS produtos (id SERIAL PRIMARY KEY, nome TEXT, preco REAL, estoque INTEGER)')
+        cur.execute('CREATE TABLE IF NOT EXISTS servicos (id SERIAL PRIMARY KEY, cliente TEXT, carro TEXT, descricao TEXT, valor REAL, data TEXT, placa TEXT, veiculo TEXT, produtos_usados TEXT)')
+        for col in ["cliente","carro","placa","veiculo","descricao","valor","data","produtos_usados"]:
+            try: cur.execute(f'ALTER TABLE servicos ADD COLUMN IF NOT EXISTS {col} TEXT')
+            except: pass
+    else:
+        cur.execute('CREATE TABLE IF NOT EXISTS produtos (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT, preco REAL, estoque INTEGER)')
+        cur.execute('CREATE TABLE IF NOT EXISTS servicos (id INTEGER PRIMARY KEY AUTOINCREMENT, cliente TEXT, placa TEXT, veiculo TEXT, carro TEXT, descricao TEXT, valor REAL, data TEXT, produtos_usados TEXT)')
+    conn.commit()
+    conn.close()
 
-HTML_BASE = """
-<!DOCTYPE html>
-<html>
-<head>
-<title>OFICINA PRO - NA NUVEM</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
+def buscar_servicos(filtro=""):
+    conn = get_conn()
+    cur = conn.cursor()
+    if filtro:
+        if USE_POSTGRES:
+            cur.execute("SELECT id, cliente, placa, veiculo, carro, descricao, valor, data, produtos_usados FROM servicos WHERE cliente ILIKE %s OR placa ILIKE %s OR veiculo ILIKE %s OR descricao ILIKE %s ORDER BY id DESC", (f"%{filtro}%",f"%{filtro}%",f"%{filtro}%",f"%{filtro}%"))
+        else:
+            cur.execute("SELECT id, cliente, placa, veiculo, carro, descricao, valor, data, produtos_usados FROM servicos WHERE cliente LIKE? OR placa LIKE? OR veiculo LIKE? OR descricao LIKE? ORDER BY id DESC", (f"%{filtro}%",f"%{filtro}%",f"%{filtro}%",f"%{filtro}%"))
+    else:
+        cur.execute("SELECT id, cliente, placa, veiculo, carro, descricao, valor, data, produtos_usados FROM servicos ORDER BY id DESC")
+    rows = cur.fetchall()
+    conn.close()
+    lista=[]
+    for r in rows:
+        if USE_POSTGRES:
+            id_, cliente, placa, veiculo, carro, descricao, valor, data, prod = r
+        else:
+            id_=r['id']; cliente=r['cliente']; placa=r['placa']; veiculo=r['veiculo']; carro=r['carro']; descricao=r['descricao']; valor=r['valor']; data=r['data']; prod=r['produtos_usados']
+        lista.append({"id":id_, "cliente":cliente or "", "placa":placa or "", "veiculo":veiculo or carro or "", "descricao":descricao or "", "valor":valor or 0, "data":data or "", "prod":prod or ""})
+    return lista
+
+BASE = """
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Oficina PRO</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
 <style>
-    body { margin:0; background:#0f0f0f; color:#fff; font-family: Arial, sans-serif; }
-   .header { background:#1a1a1a; border-bottom:3px solid #facc15; padding:12px 20px; display:flex; justify-content:space-between; align-items:center; position:sticky; top:0; z-index:99; }
-   .nav a { text-decoration:none; color:#aaa; background:#2a2a2a; padding:6px 12px; border-radius:20px; font-size:12px; margin-left:5px; }
-   .nav a.active { background:#facc15; color:#000; font-weight:900; }
-   .nav a.cta { background:#facc15; color:#000; font-weight:900; }
-   .container { max-width:800px; margin:24px auto; padding:0 16px; }
-   .card { background:#1e1e1e; border-radius:12px; padding:22px; border:1px solid #2a2a2a; margin-bottom:16px; }
-    input, textarea, select { background:#2a2a2a; border:1px solid #333; color:#fff; padding:11px; border-radius:8px; width:100%; box-sizing:border-box; }
-   .btn { background:#facc15; color:#000; border:none; padding:13px; border-radius:10px; font-weight:900; cursor:pointer; width:100%; }
-   .btn-x { background:#ef4444; color:white; border:none; padding:6px 10px; border-radius:6px; cursor:pointer; font-weight:900; }
-   .btn-edit { background:#3b82f6; color:white; border:none; padding:6px 10px; border-radius:6px; cursor:pointer; font-weight:900; }
-   .prod-item { background:#2a2a2a; border:2px solid #333; padding:12px; border-radius:10px; margin-bottom:8px; cursor:pointer; display:flex; justify-content:space-between; align-items:center; }
-   .prod-item.selected { border-color:#facc15; background:#332e00; }
-   .qty-box { display:none; align-items:center; gap:6px; margin-left:10px; }
-   .qty-box input { width:60px; text-align:center; background:#000; border:1px solid #facc15; color:#facc15; font-weight:900; }
-    th { text-align:left; color:#aaa; font-size:12px; padding:10px 6px; border-bottom:1px solid #333; }
-    td { padding:12px 6px; border-bottom:1px solid #222; font-size:13px; }
+body{background:#0e0e0e;color:#fff;font-family:Inter,Arial}
+.navbar{background:#000!important;border-bottom:3px solid #f7b500;padding:12px 15px}
+.card-dark{background:#1c1c1c;border:1px solid #2a2a2a;border-radius:12px}
+.btn-yellow{background:#f7b500;color:#000;font-weight:800;border-radius:8px;border:none}
+.btn-dark2{background:#2a2a2a;color:#fff;border:none;border-radius:8px}
+.table{--bs-table-bg:#1c1c1c!important;--bs-table-color:#e0e0e0!important;background:#1c1c1c!important;margin:0}
+.table > :not(caption) > * > *{background-color:#1c1c1c!important;color:#ddd!important;box-shadow:none!important;border-color:#222!important}
+.table thead th{background:#1c1c1c!important;color:#fff!important;border-bottom:1px solid #333!important}
+.table tbody td{background:#1c1c1c!important;color:#ddd!important;border-bottom:1px solid #222!important}
+.small-label{color:#888;font-size:13px}
+.big-number{font-size:22px;font-weight:700}
+.produto-item{background:#252525;border:1px solid #333;border-radius:8px;padding:10px 12px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;cursor:pointer}
+.produto-item.selected{background:#2e2a15;border-color:#f7b500}
+.qty-box{display:none; align-items:center; gap:6px;}
+.qty-box input{width:55px; text-align:center; background:#000; border:1px solid #f7b500; color:#f7b500; font-weight:900; border-radius:6px; padding:4px;}
+.qty-btn{background:#f7b500; color:#000; border:none; width:28px; height:28px; border-radius:6px; font-weight:900;}
 </style>
-</head>
-<body>
-<div class="header">
-  <b>OFICINA PRO - NA NUVEM</b>
-  <div class="nav">
-    <a href="/" class="{{'active' if active=='inicio' else ''}}">Início</a>
-    <a href="/produtos" class="{{'active' if active=='prod' else ''}}">Produtos</a>
-    <a href="/historico" class="{{'active' if active=='hist' else ''}}">Histórico</a>
-    <a href="/nova_os" class="cta">+ Nova OS</a>
-  </div>
+</head><body>
+<nav class="navbar d-flex justify-content-between">
+<div class="fw-bold">OFICINA PRO - NA NUVEM</div>
+<div class="d-flex gap-2 flex-wrap">
+<a href="/" class="btn btn-dark2 btn-sm">Início</a>
+<a href="/produtos" class="btn btn-dark2 btn-sm">Produtos</a>
+<a href="/historico" class="btn btn-dark2 btn-sm">Histórico</a>
+<a href="/exportar_excel" class="btn btn-dark2 btn-sm">Excel</a>
+<a href="/nova_os" class="btn btn-yellow btn-sm">+ Nova OS</a>
 </div>
-<div class="container">
-{{content}}
-</div>
-<script>
-let selected = {};
-function toggleProd(id){
-  const el = document.getElementById('p-'+id);
-  const qtyBox = document.getElementById('qty-'+id);
-  if(selected[id]){
-    delete selected[id];
-    el.classList.remove('selected');
-    qtyBox.style.display='none';
-  } else {
-    selected[id]=1;
-    el.classList.add('selected');
-    qtyBox.style.display='flex';
-    document.getElementById('q-'+id).value=1;
-  }
-  updateHidden(); calcTotal();
-}
-function changeQty(id, delta){
-  let v = parseInt(document.getElementById('q-'+id).value)||1;
-  v+=delta;
-  if(v<1) v=1;
-  document.getElementById('q-'+id).value=v;
-  selected[id]=v;
-  updateHidden(); calcTotal();
-}
-function onQtyInput(id){
-  let v = parseInt(document.getElementById('q-'+id).value)||1;
-  if(v<1) v=1;
-  selected[id]=v;
-  updateHidden(); calcTotal();
-}
-function updateHidden(){
-  let arr=[];
-  for(let id in selected){ arr.push(id+':'+selected[id]); }
-  document.getElementById('produtos_input').value = arr.join(',');
-}
-function calcTotal(){
-  const mao = parseFloat(document.getElementById('mao').value)||0;
-  let totalProd=0;
-  for(let id in selected){
-    const precoEl = document.getElementById('preco-'+id);
-    if(precoEl){ totalProd += parseFloat(precoEl.value)*selected[id]; }
-  }
-  const total = mao+totalProd;
-  document.getElementById('total_auto').value = total.toFixed(2);
-  document.getElementById('total_view').innerText = 'R$ '+total.toFixed(2);
-  document.getElementById('btn_total').innerText = 'SALVAR SERVICO - R$ '+total.toFixed(2);
-}
-</script>
-</body>
-</html>
+</nav>
+<div class="container py-4" style="max-width:950px">{{content|safe}}</div>
+</body></html>
 """
 
-@app.route("/")
+@app.route('/')
 def index():
-    content = f"""
-    <div class="card"><h3>Oficina Pro</h3><p style="color:#aaa;">{len(produtos_db)} produtos • {len(ordens_db)} OS</p>
-    <a href="/nova_os"><button class="btn" style="margin-top:12px;">+ NOVA OS - CALCULO AUTOMATICO</button></a></div>
-    """
-    return render_template_string(HTML_BASE.replace("{{content}}", content), active="inicio")
-
-@app.route("/produtos", methods=["GET","POST"])
-def produtos():
-    global produtos_db
-    if request.method=="POST":
-        acao=request.form.get("acao"); pid=request.form.get("id")
-        if acao=="add":
-            produtos_db.append({"id": next_id(produtos_db),"nome": request.form.get("nome").upper(),"preco": float(request.form.get("preco") or 0),"estoque": int(request.form.get("estoque") or 0)})
-        elif acao=="delete" and pid:
-            produtos_db=[p for p in produtos_db if str(p["id"])!=str(pid)]
-        elif acao=="edit" and pid:
-            p=next((x for x in produtos_db if str(x["id"])==str(pid)),None)
-            if p: p["nome"]=request.form.get("nome").upper(); p["preco"]=float(request.form.get("preco") or 0); p["estoque"]=int(request.form.get("estoque") or 0)
-        return redirect("/produtos")
-    edit_id=request.args.get("edit", type=int); rows=""
-    for p in produtos_db:
-        if edit_id==p["id"]:
-            rows+=f"""<tr style="background:#2a2a2a;"><td colspan="4"><form method="POST" style="display:grid; grid-template-columns:2fr 1fr 1fr 1fr; gap:8px;"><input type="hidden" name="acao" value="edit"><input type="hidden" name="id" value="{p['id']}"><input name="nome" value="{p['nome']}" required><input name="preco" type="number" step="0.01" value="{p['preco']}" required><input name="estoque" type="number" value="{p['estoque']}" required><div style="display:flex; gap:4px;"><button class="btn" style="padding:8px;">Salvar</button><a href="/produtos" style="background:#444; color:#fff; padding:8px 12px; border-radius:8px; text-decoration:none;">X</a></div></form></td></tr>"""
-        else:
-            rows+=f"""<tr><td>{p['nome']}</td><td>R$ {p['preco']:.2f}</td><td>{p['estoque']}</td><td style="text-align:right;"><a href="/produtos?edit={p['id']}" style="text-decoration:none;"><button class="btn-edit">✏️</button></a><form method="POST" style="display:inline;" onsubmit="return confirm('Excluir?')"><input type="hidden" name="acao" value="delete"><input type="hidden" name="id" value="{p['id']}"><button class="btn-x">X</button></form></td></tr>"""
-    content=f"""
-    <div class="card"><h3>Produtos</h3>
-      <form method="POST" style="display:grid; grid-template-columns:2fr 1fr 1fr 1fr; gap:8px; margin-bottom:12px;"><input type="hidden" name="acao" value="add"><input name="nome" placeholder="NOME" required><input name="preco" type="number" step="0.01" placeholder="Preço" required><input name="estoque" type="number" placeholder="Qtd" required><button class="btn">+ Add</button></form>
-      <table><tr><th>Nome</th><th>Preço</th><th>Est</th><th></th></tr>{rows}</table>
-      <p style="color:#666; font-size:11px; margin-top:10px;">Clique no ✏️ para editar preço e estoque</p>
-    </div>"""
-    return render_template_string(HTML_BASE.replace("{{content}}", content), active="prod")
-
-@app.route("/nova_os", methods=["GET","POST"])
-def nova_os():
-    global produtos_db, ordens_db
-    if request.method=="POST":
-        cliente=request.form.get("cliente"); placa=request.form.get("placa"); veiculo=request.form.get("veiculo"); feito=request.form.get("feito")
-        mao=float(request.form.get("mao") or 0); produtos_str=request.form.get("produtos") or ""; total=float(request.form.get("total_auto") or 0)
-        itens=[]; texto_produtos=[]
-        if produtos_str:
-            for item in produtos_str.split(","):
-                if ":" in item:
-                    pid, qty = item.split(":")
-                    if pid.isdigit():
-                        p=next((x for x in produtos_db if str(x["id"])==pid), None)
-                        if p:
-                            q=int(qty)
-                            itens.append({"nome": p["nome"], "preco": p["preco"], "qtd": q, "subtotal": p["preco"]*q})
-                            texto_produtos.append(f"{q}x {p['nome']}")
-                            # baixa estoque
-                            p["estoque"] = max(0, p["estoque"]-q)
-        ordens_db.append({"id": len(ordens_db)+1, "cliente": cliente, "placa": placa, "veiculo": veiculo, "feito": feito, "mao": mao, "itens": itens, "texto": ", ".join(texto_produtos), "total": total, "data": datetime.now().strftime("%d/%m/%Y %H:%M")})
-        return redirect("/historico")
-
-    lista=""
-    for p in produtos_db:
-        lista+=f"""
-        <div class="prod-item" id="p-{p['id']}" onclick="toggleProd({p['id']})">
-          <div><b>{p['nome']}</b><br><small style="color:#aaa;">R$ {p['preco']:.2f} - Est: {p['estoque']}</small></div>
-          <div style="display:flex; align-items:center;">
-            <div class="qty-box" id="qty-{p['id']}" onclick="event.stopPropagation();">
-              <button type="button" onclick="changeQty({p['id']},-1)" style="background:#444; color:#fff; border:none; width:28px; height:28px; border-radius:6px; font-weight:900;">-</button>
-              <input id="q-{p['id']}" type="number" value="1" min="1" oninput="onQtyInput({p['id']})" onclick="event.stopPropagation();">
-              <button type="button" onclick="changeQty({p['id']},1)" style="background:#facc15; color:#000; border:none; width:28px; height:28px; border-radius:6px; font-weight:900;">+</button>
-            </div>
-            <span style="margin-left:8px; color:#666;">✓</span>
-          </div>
-          <input type="hidden" id="preco-{p['id']}" value="{p['preco']}">
-        </div>
-        """
-    content=f"""
-    <div class="card">
-      <h3>+ Nova OS - Cálculo Automático</h3>
-      <form method="POST">
-        <div style="display:grid; grid-template-columns:2fr 1fr 1fr; gap:10px;">
-          <div><label style="font-size:11px; color:#aaa;">Cliente *</label><input name="cliente" required></div>
-          <div><label style="font-size:11px; color:#aaa;">Placa</label><input name="placa"></div>
-          <div><label style="font-size:11px; color:#aaa;">Veículo</label><input name="veiculo"></div>
-        </div>
-        <div style="margin-top:12px;"><label style="font-size:11px; color:#aaa;">O que foi feito *</label><textarea name="feito" rows="3" required></textarea></div>
-        <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:12px;">
-          <div><label style="font-size:11px; color:#aaa;">Mão de Obra R$</label><input id="mao" name="mao" type="number" value="0" oninput="calcTotal()"></div>
-          <div><label style="font-size:11px; color:#aaa;">Total Automático</label><input id="total_auto" name="total_auto" readonly style="border-color:#facc15; background:#000; color:#facc15; font-weight:900;"><small id="total_view" style="color:#facc15; font-weight:900;">R$ 0.00</small></div>
-        </div>
-        <div style="margin-top:18px;"><label style="font-size:11px; color:#aaa;">Produtos usados (clique que soma no total automaticamente)</label><input type="hidden" name="produtos" id="produtos_input"><div style="max-height:380px; overflow:auto; margin-top:8px;">{lista}</div></div>
-        <button class="btn" type="submit" id="btn_total" style="margin-top:16px;">SALVAR SERVIÇO - R$ 0.00</button>
-      </form>
-      <p style="color:#666; font-size:11px; margin-top:10px;">NOVO: Agora clique no produto e escolha a quantidade com + e -. Ex: 2x filtro, 4x calço</p>
+    init_db()
+    conn = get_conn(); cur = conn.cursor()
+    try: cur.execute("SELECT COUNT(*) FROM servicos"); total_serv = cur.fetchone()[0]
+    except: total_serv=0
+    try: cur.execute("SELECT COALESCE(SUM(valor),0) FROM servicos"); faturado = cur.fetchone()[0] or 0
+    except: faturado=0
+    try: cur.execute("SELECT COUNT(*) FROM produtos"); total_prod = cur.fetchone()[0]
+    except: total_prod=0
+    conn.close()
+    servicos = buscar_servicos()[:8]
+    linhas=""
+    for s in servicos:
+        linhas+=f"<tr><td>{s['data']}</td><td><b>{s['cliente']}</b><br><span class='small-label'>{s['veiculo']} {s['placa']}</span></td><td>{s['descricao']}<br><span class='small-label' style='color:#f7b500'>{s['prod']}</span></td><td>R$ {float(s['valor']):.2f}</td><td><a href='/imprimir/{s['id']}' target='_blank' class='btn btn-sm btn-dark2'>🖨️</a> <a href='/editar_servico/{s['id']}' class='btn btn-sm btn-dark2'>✏️</a> <a href='/excluir_servico/{s['id']}' class='btn btn-sm btn-danger'>🗑️</a></td></tr>"
+    html = f"""
+    <div class="row g-3">
+      <div class="col-6"><div class="card-dark p-4"><div class="big-number">{total_serv}</div><div class="small-label mt-2">Serviços</div></div></div>
+      <div class="col-6"><div class="card-dark p-4"><div class="big-number">R$ {float(faturado):.2f}</div><div class="small-label mt-2">Faturado</div></div></div>
+      <div class="col-6"><div class="card-dark p-4"><div class="big-number">{total_prod}</div><div class="small-label mt-2">Produtos</div></div></div>
+      <div class="col-6"><div class="card-dark p-4 d-flex flex-column gap-2"><a href="/nova_os" class="btn btn-yellow w-100 py-3">+ REGISTRAR SERVIÇO</a><a href="/exportar_excel" class="btn btn-dark2 w-100">📊 Exportar Excel</a></div></div>
+    </div>
+    <div class="card-dark p-4 mt-4">
+      <h6 class="fw-bold mb-3">Últimos Serviços</h6>
+      <table class="table"><thead><tr><th>Data</th><th>Cliente</th><th>Feito</th><th>Valor</th><th>Ações</th></tr></thead><tbody>{linhas if linhas else '<tr><td colspan=5 class=small-label>Nenhum serviço</td></tr>'}</tbody></table>
     </div>
     """
-    return render_template_string(HTML_BASE.replace("{{content}}", content), active="nova")
+    return render_template_string(BASE, content=html)
 
-@app.route("/historico")
+@app.route('/produtos', methods=['GET','POST'])
+def produtos():
+    init_db()
+    conn = get_conn(); cur = conn.cursor()
+    if request.method == 'POST':
+        if USE_POSTGRES: cur.execute("INSERT INTO produtos (nome, preco, estoque) VALUES (%s,%s,%s)", (request.form['nome'], request.form['preco'], request.form['estoque']))
+        else: cur.execute("INSERT INTO produtos (nome, preco, estoque) VALUES (?,?,?)", (request.form['nome'], request.form['preco'], request.form['estoque']))
+        conn.commit(); conn.close(); return redirect('/produtos')
+    cur.execute("SELECT * FROM produtos ORDER BY id DESC"); rows = cur.fetchall(); conn.close()
+    linhas=""
+    for r in rows:
+        id_, nome, preco, est = (r[0], r[1], r[2], r[3]) if USE_POSTGRES else (r['id'], r['nome'], r['preco'], r['estoque'])
+        linhas+=f"<tr><td>{nome}</td><td>R$ {float(preco or 0):.2f}</td><td>{est}</td><td><a href='/editar_produto/{id_}' class='btn btn-sm btn-dark2' style='margin-right:4px;'>✏️</a><a href='/excluir_produto/{id_}' class='btn btn-sm btn-danger'>X</a></td></tr>"
+    html = f"""
+    <div class="card-dark p-4">
+    <h5 class="fw-bold mb-3">Produtos</h5>
+    <form method="POST" class="row g-2 mb-4">
+      <div class="col-md-5"><input name="nome" class="form-control bg-dark text-white border-secondary" placeholder="Nome" required></div>
+      <div class="col-md-3"><input name="preco" type="number" step="0.01" class="form-control bg-dark text-white border-secondary" placeholder="Preço" required></div>
+      <div class="col-md-2"><input name="estoque" type="number" class="form-control bg-dark text-white border-secondary" placeholder="Est" required></div>
+      <div class="col-md-2"><button class="btn btn-yellow w-100">+ Add</button></div>
+    </form>
+    <table class="table"><thead><tr><th>Nome</th><th>Preço</th><th>Est</th><th>Ações</th></tr></thead><tbody>{linhas}</tbody></table>
+    <div class="small-label mt-3">NOVO: Clique no ✏️ para editar quantidade e preço</div>
+    </div>
+    """
+    return render_template_string(BASE, content=html)
+
+@app.route('/editar_produto/<int:id>', methods=['GET','POST'])
+def editar_produto(id):
+    init_db()
+    conn = get_conn(); cur = conn.cursor()
+    cur.execute("SELECT * FROM produtos WHERE id=%s" % ("%s" if USE_POSTGRES else "?"), (id,))
+    r = cur.fetchone()
+    if not r: conn.close(); return redirect('/produtos')
+    if USE_POSTGRES: pid, nome, preco, est = r
+    else: pid=r['id']; nome=r['nome']; preco=r['preco']; est=r['estoque']
+    if request.method=='POST':
+        if USE_POSTGRES: cur.execute("UPDATE produtos SET nome=%s, preco=%s, estoque=%s WHERE id=%s", (request.form['nome'], request.form['preco'], request.form['estoque'], id))
+        else: cur.execute("UPDATE produtos SET nome=?, preco=?, estoque=? WHERE id=?", (request.form['nome'], request.form['preco'], request.form['estoque'], id))
+        conn.commit(); conn.close(); return redirect('/produtos')
+    conn.close()
+    html=f"""
+    <div class="card-dark p-4">
+      <h5 class="fw-bold mb-3">Editar Produto #{pid}</h5>
+      <form method="POST" class="row g-3">
+        <div class="col-md-6"><label class="small-label">Nome</label><input name="nome" value="{nome}" class="form-control bg-dark text-white border-secondary" required></div>
+        <div class="col-md-3"><label class="small-label">Preço</label><input name="preco" type="number" step="0.01" value="{preco}" class="form-control bg-dark text-white border-secondary" required></div>
+        <div class="col-md-3"><label class="small-label">Estoque (quantidade)</label><input name="estoque" type="number" value="{est}" class="form-control bg-dark text-white border-secondary" required></div>
+        <div class="col-12"><button class="btn btn-yellow w-100">SALVAR EDIÇÃO</button><a href="/produtos" class="btn btn-dark2 w-100 mt-2">Cancelar</a></div>
+      </form>
+    </div>
+    """
+    return render_template_string(BASE, content=html)
+
+@app.route('/excluir_produto/<int:id>')
+def excluir_produto(id):
+    conn = get_conn(); cur = conn.cursor()
+    if USE_POSTGRES: cur.execute("DELETE FROM produtos WHERE id=%s", (id,))
+    else: cur.execute("DELETE FROM produtos WHERE id=?", (id,))
+    conn.commit(); conn.close(); return redirect('/produtos')
+
+@app.route('/excluir_servico/<int:id>')
+def excluir_servico(id):
+    conn = get_conn(); cur = conn.cursor()
+    if USE_POSTGRES: cur.execute("DELETE FROM servicos WHERE id=%s", (id,))
+    else: cur.execute("DELETE FROM servicos WHERE id=?", (id,))
+    conn.commit(); conn.close(); return redirect(request.referrer or '/')
+
+@app.route('/nova_os', methods=['GET','POST'])
+def nova_os():
+    init_db()
+    conn = get_conn(); cur = conn.cursor()
+    cur.execute("SELECT * FROM produtos WHERE estoque > 0 ORDER BY nome ASC"); produtos = cur.fetchall()
+    if request.method == 'POST':
+        cliente = request.form.get('cliente',''); placa = request.form.get('placa',''); veiculo = request.form.get('veiculo','')
+        descricao = request.form.get('descricao',''); valor = request.form.get('valor_total','0') or 0
+        selecionados = request.form.getlist('produtos')
+        data = datetime.now().strftime("%d/%m/%Y %H:%M")
+        nomes_usados=[]
+        for pid in selecionados:
+            try:
+                qty = int(request.form.get(f'qty_{pid}', '1') or 1)
+                if qty < 1: qty=1
+                if USE_POSTGRES: cur.execute("SELECT nome FROM produtos WHERE id=%s", (int(pid),))
+                else: cur.execute("SELECT nome FROM produtos WHERE id=?", (int(pid),))
+                prow = cur.fetchone()
+                if prow:
+                    nome_p = prow[0] if USE_POSTGRES else prow['nome']
+                    nomes_usados.append(f"{qty}x {nome_p}" if qty>1 else nome_p)
+                    if USE_POSTGRES: cur.execute("UPDATE produtos SET estoque = estoque - %s WHERE id=%s", (qty, int(pid),))
+                    else: cur.execute("UPDATE produtos SET estoque = estoque -? WHERE id=?", (qty, int(pid),))
+            except Exception as e: print(e); pass
+        prod_txt = ", ".join(nomes_usados)
+        desc_final = f"{descricao}"
+        carro_full = f"{veiculo} - {placa}".strip(" -")
+        if USE_POSTGRES: cur.execute("INSERT INTO servicos (cliente, carro, placa, veiculo, descricao, valor, data, produtos_usados) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)", (cliente, carro_full, placa, veiculo, desc_final, valor, data, prod_txt))
+        else: cur.execute("INSERT INTO servicos (cliente, placa, veiculo, carro, descricao, valor, data, produtos_usados) VALUES (?,?,?,?,?,?,?,?)", (cliente, placa, veiculo, carro_full, desc_final, valor, data, prod_txt))
+        conn.commit(); conn.close(); return redirect('/')
+
+    lista_prod_html=""
+    for r in produtos:
+        id_, nome, preco, est = (r[0], r[1], r[2], r[3]) if USE_POSTGRES else (r['id'], r['nome'], r['preco'], r['estoque'])
+        lista_prod_html += f"""
+        <div class="produto-item" id="item-{id_}" data-preco="{float(preco or 0)}" onclick="toggleProd({id_})">
+          <div><input type="checkbox" name="produtos" value="{id_}" id="chk-{id_}" style="display:none"><b>{nome}</b><br><span class="small-label">R$ {float(preco or 0):.2f} - Est: {est}</span></div>
+          <div style="display:flex; align-items:center; gap:8px;">
+            <div class="qty-box" id="qtybox-{id_}" onclick="event.stopPropagation()">
+              <button type="button" class="qty-btn" onclick="changeQty({id_},-1)">-</button>
+              <input type="number" id="qty-{id_}" name="qty_{id_}" value="1" min="1" oninput="calcTotal()" onclick="event.stopPropagation()">
+              <button type="button" class="qty-btn" onclick="changeQty({id_},1)">+</button>
+            </div>
+            <span class="small-label" id="check-{id_}">✓</span>
+          </div>
+        </div>
+        """
+    if not lista_prod_html: lista_prod_html = "<div class='small-label'>Nenhum produto em estoque.</div>"
+    conn.close()
+    html = f"""
+    <div class="card-dark p-4">
+    <h5 class="fw-bold mb-3">+ Nova OS - Cálculo Automático (com quantidade)</h5>
+    <form method="POST">
+      <div class="row g-3">
+        <div class="col-md-6"><label class="small-label">Cliente *</label><input name="cliente" class="form-control bg-dark text-white border-secondary" required></div>
+        <div class="col-md-3"><label class="small-label">Placa</label><input name="placa" class="form-control bg-dark text-white border-secondary"></div>
+        <div class="col-md-3"><label class="small-label">Veículo</label><input name="veiculo" class="form-control bg-dark text-white border-secondary"></div>
+        <div class="col-12"><label class="small-label">O que foi feito *</label><textarea name="descricao" rows="3" class="form-control bg-dark text-white border-secondary" required></textarea></div>
+        <div class="col-md-4"><label class="small-label">Mão de Obra R$</label><input id="valor_mao" type="number" step="0.01" class="form-control bg-dark text-white border-secondary" placeholder="0.00" oninput="calcTotal()"></div>
+        <div class="col-md-4"><label class="small-label">Total Automático</label><input id="valor_total" name="valor_total" type="number" step="0.01" class="form-control bg-dark text-white border-secondary" style="border-color:#f7b500!important;font-weight:bold" readonly><div id="valor_display" class="small-label mt-1" style="color:#f7b500">R$ 0.00</div></div>
+      </div>
+      <div class="mt-4"><label class="small-label fw-bold">Produtos usados (clique e escolha a quantidade)</label><div class="mt-2" style="max-height:380px;overflow-y:auto">{lista_prod_html}</div></div>
+      <button class="btn btn-yellow w-100 py-3 mt-4">SALVAR SERVIÇO - <span id="valor_display2">R$ 0.00</span></button>
+    </form>
+    </div>
+    <script>
+    function toggleProd(id){{
+      const el=document.getElementById('item-'+id);
+      const chk=document.getElementById('chk-'+id);
+      const qtybox=document.getElementById('qtybox-'+id);
+      el.classList.toggle('selected');
+      chk.checked = el.classList.contains('selected');
+      qtybox.style.display = chk.checked? 'flex' : 'none';
+      if(!chk.checked){{ document.getElementById('qty-'+id).value=1; }}
+      calcTotal();
+    }}
+    function changeQty(id, delta){{
+      const inp=document.getElementById('qty-'+id);
+      let v=parseInt(inp.value)||1;
+      v+=delta;
+      if(v<1) v=1;
+      inp.value=v;
+      calcTotal();
+    }}
+    function calcTotal(){{
+      let t=parseFloat(document.getElementById('valor_mao').value)||0;
+      document.querySelectorAll('.produto-item.selected').forEach(item=>{{
+        const id=item.id.replace('item-','');
+        const preco=parseFloat(item.dataset.preco)||0;
+        const qty=parseInt(document.getElementById('qty-'+id).value)||1;
+        t+=preco*qty;
+      }});
+      document.getElementById('valor_total').value=t.toFixed(2);
+      document.getElementById('valor_display').innerText='R$ '+t.toFixed(2);
+      const d2=document.getElementById('valor_display2');
+      if(d2) d2.innerText='R$ '+t.toFixed(2);
+    }}
+    </script>
+    """
+    return render_template_string(BASE, content=html)
+
+@app.route('/editar_servico/<int:id>', methods=['GET','POST'])
+def editar_servico(id):
+    conn = get_conn(); cur = conn.cursor()
+    if USE_POSTGRES: cur.execute("SELECT id, cliente, placa, veiculo, carro, descricao, valor, data, produtos_usados FROM servicos WHERE id=%s", (id,))
+    else: cur.execute("SELECT id, cliente, placa, veiculo, carro, descricao, valor, data, produtos_usados FROM servicos WHERE id=?", (id,))
+    r = cur.fetchone()
+    if not r: conn.close(); return redirect('/')
+    s = {"id":r[0] if USE_POSTGRES else r['id'], "cliente":r[1] if USE_POSTGRES else r['cliente'], "placa":r[2] if USE_POSTGRES else r['placa'], "veiculo":r[3] if USE_POSTGRES else r['veiculo'], "descricao":r[5] if USE_POSTGRES else r['descricao'], "valor":r[6] if USE_POSTGRES else r['valor']}
+    if request.method == 'POST':
+        if USE_POSTGRES: cur.execute("UPDATE servicos SET cliente=%s, placa=%s, veiculo=%s, descricao=%s, valor=%s WHERE id=%s", (request.form['cliente'], request.form['placa'], request.form['veiculo'], request.form['descricao'], request.form['valor'], id))
+        else: cur.execute("UPDATE servicos SET cliente=?, placa=?, veiculo=?, descricao=?, valor=? WHERE id=?", (request.form['cliente'], request.form['placa'], request.form['veiculo'], request.form['descricao'], request.form['valor'], id))
+        conn.commit(); conn.close(); return redirect('/historico')
+    conn.close()
+    html = f"""
+    <div class="card-dark p-4">
+    <h5 class="fw-bold mb-3">Editar OS #{s['id']}</h5>
+    <form method="POST" class="row g-3">
+      <div class="col-md-6"><label class="small-label">Cliente</label><input name="cliente" value="{s['cliente']}" class="form-control bg-dark text-white border-secondary" required></div>
+      <div class="col-md-3"><label class="small-label">Placa</label><input name="placa" value="{s['placa']}" class="form-control bg-dark text-white border-secondary"></div>
+      <div class="col-md-3"><label class="small-label">Veículo</label><input name="veiculo" value="{s['veiculo']}" class="form-control bg-dark text-white border-secondary"></div>
+      <div class="col-12"><label class="small-label">O que foi feito</label><textarea name="descricao" rows="3" class="form-control bg-dark text-white border-secondary" required>{s['descricao']}</textarea></div>
+      <div class="col-md-4"><label class="small-label">Valor</label><input name="valor" type="number" step="0.01" value="{s['valor']}" class="form-control bg-dark text-white border-secondary"></div>
+      <div class="col-12"><button class="btn btn-yellow w-100">SALVAR EDIÇÃO</button></div>
+    </form>
+    </div>
+    """
+    return render_template_string(BASE, content=html)
+
+@app.route('/historico')
 def historico():
-    rows=""
-    for o in reversed(ordens_db):
-        rows+=f"<tr><td style='padding:10px; border-bottom:1px solid #222;'>{o['data']}</td><td style='padding:10px; border-bottom:1px solid #222; font-weight:800;'>{o['cliente']}<br><small style='color:#aaa;'>{o['placa']} {o['veiculo']}</small></td><td style='padding:10px; border-bottom:1px solid #222;'>{o['feito']}<br><small style='color:#facc15;'>{o['texto']}</small></td><td style='padding:10px; border-bottom:1px solid #222; font-weight:900; color:#facc15;'>R$ {o['total']:.2f}</td></tr>"
-    if not rows: rows="<tr><td colspan=4 style='padding:24px; text-align:center; color:#666;'>Nenhuma OS ainda</td></tr>"
-    content=f"<div class='card'><h3>Histórico</h3><table style='width:100%; border-collapse:collapse;'><tr><th>Data</th><th>Cliente</th><th>Serviço</th><th>Total</th></tr>{rows}</table></div>"
-    return render_template_string(HTML_BASE.replace("{{content}}", content), active="hist")
+    init_db()
+    q = request.args.get('q','')
+    servicos = buscar_servicos(q)
+    linhas=""
+    for s in servicos:
+        linhas+=f"<tr><td>{s['data']}</td><td><b>{s['cliente']}</b><br><span class='small-label'>{s['veiculo']} {s['placa']}</span></td><td>{s['descricao']}<br><span class='small-label' style='color:#f7b500'>{s['prod']}</span></td><td>R$ {float(s['valor'] or 0):.2f}</td><td><a href='/imprimir/{s['id']}' target='_blank' class='btn btn-sm btn-dark2'>🖨️</a> <a href='/editar_servico/{s['id']}' class='btn btn-sm btn-dark2'>✏️</a> <a href='/excluir_servico/{s['id']}' class='btn btn-sm btn-danger'>🗑️</a></td></tr>"
+    html = f"""
+    <div class="card-dark p-4">
+    <div class="d-flex justify-content-between align-items-center mb-3"><h5 class="fw-bold m-0">Histórico Completo</h5><a href="/exportar_excel" class="btn btn-yellow btn-sm">📊 Excel</a></div>
+    <form method="GET" class="mb-3">
+      <div class="input-group"><input name="q" value="{q}" class="form-control bg-dark text-white border-secondary" placeholder="Pesquisar cliente, placa..."><button class="btn btn-yellow">Buscar</button></div>
+    </form>
+    <table class="table"><thead><tr><th>Data</th><th>Cliente</th><th>Feito</th><th>Valor</th><th>Ações</th></tr></thead><tbody>{linhas if linhas else '<tr><td colspan=5 class=small-label>Nenhum resultado</td></tr>'}</tbody></table>
+    </div>
+    """
+    return render_template_string(BASE, content=html)
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+@app.route('/exportar_excel')
+def exportar_excel():
+    servicos = buscar_servicos()
+    try:
+        import openpyxl
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Serviços"
+        ws.append(["Data","Cliente","Placa","Veículo","Descrição","Produtos Usados","Valor"])
+        for s in servicos:
+            ws.append([s['data'], s['cliente'], s['placa'], s['veiculo'], s['descricao'], s['prod'], float(s['valor'] or 0)])
+        bio = BytesIO()
+        wb.save(bio)
+        bio.seek(0)
+        return send_file(bio, as_attachment=True, download_name=f"oficina_{datetime.now().strftime('%d-%m-%Y')}.xlsx", mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    except:
+        output = "Data,Cliente,Placa,Veiculo,Descricao,Produtos,Valor\n"
+        for s in servicos:
+            output += f"\"{s['data']}\",\"{s['cliente']}\",\"{s['placa']}\",\"{s['veiculo']}\",\"{s['descricao']}\",\"{s['prod']}\",{s['valor']}\n"
+        bio = BytesIO(output.encode('utf-8'))
+        return send_file(bio, as_attachment=True, download_name="oficina.csv", mimetype="text/csv")
+
+@app.route('/imprimir/<int:id>')
+def imprimir(id):
+    conn = get_conn(); cur = conn.cursor()
+    if USE_POSTGRES: cur.execute("SELECT id, cliente, placa, veiculo, carro, descricao, valor, data, produtos_usados FROM servicos WHERE id=%s", (id,))
+    else: cur.execute("SELECT id, cliente, placa, veiculo, carro, descricao, valor, data, produtos_usados FROM servicos WHERE id=?", (id,))
+    r = cur.fetchone()
+    conn.close()
+    if not r: return "OS não encontrada"
+    if USE_POSTGRES:
+        s = {"id":r[0], "cliente":r[1], "placa":r[2], "veiculo":r[3], "descricao":r[5], "valor":r[6], "data":r[7], "prod":r[8]}
+    else:
+        s = {"id":r['id'], "cliente":r['cliente'], "placa":r['placa'], "veiculo":r['veiculo'], "descricao":r['descricao'], "valor":r['valor'], "data":r['data'], "prod":r['produtos_usados']}
+    html_print = f"""
+    <!doctype html><html><head><meta charset="utf-8"><title>OS #{s['id']}</title>
+    <style>body{{font-family:Arial;padding:30px}}.header{{border-bottom:3px solid #f7b500;padding-bottom:15px;margin-bottom:20px}}.box{{border:1px solid #ddd;padding:15px;border-radius:8px;margin-bottom:15px}}.btn{{background:#f7b500;color:#000;padding:10px 20px;border:none;border-radius:6px;font-weight:bold;cursor:pointer}} @media print{{.no-print{{display:none}}}}</style>
+    </head><body>
+    <div class="header"><h2>OFICINA PRO - ORDEM DE SERVIÇO #{s['id']}</h2><p>Data: {s['data']}</p></div>
+    <div class="box"><b>Cliente:</b> {s['cliente']}<br><b>Veículo:</b> {s['veiculo']}<br><b>Placa:</b> {s['placa']}</div>
+    <div class="box"><b>Serviço Executado:</b><br>{s['descricao']}<br><br><b>Produtos Usados:</b> {s['prod']}</div>
+    <div class="box"><h3>Valor Total: R$ {float(s['valor'] or 0):.2f}</h3></div>
+    <div class="box" style="margin-top:40px"><br><br>Assinatura do Cliente: ___________________________________<br><br><br>Assinatura da Oficina: __________________________________</div>
+    <div class="no-print" style="margin-top:20px"><button class="btn" onclick="window.print()">🖨️ IMPRIMIR / SALVAR EM PDF</button> <a href="/historico" class="btn" style="background:#333;color:#fff;text-decoration:none">Voltar</a></div>
+    </body></html>
+    """
+    return html_print
+
+if __name__ == '__main__':
+    app.run(debug=True)
