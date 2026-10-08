@@ -88,7 +88,8 @@ body{background:#0e0e0e;color:#fff;font-family:Inter,Arial}
 <a href="/" class="btn btn-dark2 btn-sm">Início</a>
 <a href="/produtos" class="btn btn-dark2 btn-sm">Produtos</a>
 <a href="/historico" class="btn btn-dark2 btn-sm">Histórico</a>
-<a href="/exportar_excel" class="btn btn-dark2 btn-sm">Excel</a>
+<a href="/exportar_excel" class="btn btn-dark2 btn-sm">Excel OS</a>
+<a href="/exportar_produtos" class="btn btn-dark2 btn-sm">Excel Produtos</a>
 <a href="/nova_os" class="btn btn-yellow btn-sm">+ Nova OS</a>
 </div>
 </nav>
@@ -116,7 +117,7 @@ def index():
       <div class="col-6"><div class="card-dark p-4"><div class="big-number">{total_serv}</div><div class="small-label mt-2">Serviços</div></div></div>
       <div class="col-6"><div class="card-dark p-4"><div class="big-number">R$ {float(faturado):.2f}</div><div class="small-label mt-2">Faturado</div></div></div>
       <div class="col-6"><div class="card-dark p-4"><div class="big-number">{total_prod}</div><div class="small-label mt-2">Produtos</div></div></div>
-      <div class="col-6"><div class="card-dark p-4 d-flex flex-column gap-2"><a href="/nova_os" class="btn btn-yellow w-100 py-3">+ REGISTRAR SERVIÇO</a><a href="/exportar_excel" class="btn btn-dark2 w-100">📊 Exportar Excel</a></div></div>
+      <div class="col-6"><div class="card-dark p-4 d-flex flex-column gap-2"><a href="/nova_os" class="btn btn-yellow w-100 py-3">+ REGISTRAR SERVIÇO</a><div class="d-flex gap-2"><a href="/exportar_excel" class="btn btn-dark2 w-50">📊 Excel OS</a><a href="/exportar_produtos" class="btn btn-dark2 w-50">📦 Excel Produtos</a></div></div></div>
     </div>
     <div class="card-dark p-4 mt-4">
       <h6 class="fw-bold mb-3">Últimos Serviços</h6>
@@ -129,24 +130,114 @@ def index():
 def produtos():
     init_db()
     conn = get_conn(); cur = conn.cursor()
+    msg = ""
     if request.method == 'POST':
-        if USE_POSTGRES: cur.execute("INSERT INTO produtos (nome, preco, estoque) VALUES (%s,%s,%s)", (request.form['nome'], request.form['preco'], request.form['estoque']))
-        else: cur.execute("INSERT INTO produtos (nome, preco, estoque) VALUES (?,?,?)", (request.form['nome'], request.form['preco'], request.form['estoque']))
-        conn.commit(); conn.close(); return redirect('/produtos')
+        # IMPORTAR PLANILHA
+        if 'arquivo' in request.files and request.files['arquivo'].filename!= '':
+            file = request.files['arquivo']
+            try:
+                import pandas as pd
+                df_dict = pd.read_excel(file, sheet_name=None)
+                # acha aba com PRODUTO
+                sheet = None
+                for name in df_dict:
+                    cols_up = [str(c).upper() for c in df_dict[name].columns]
+                    if any('PRODUTO' in c or 'NOME' in c for c in cols_up):
+                        sheet = df_dict[name]
+                        break
+                if sheet is None:
+                    sheet = list(df_dict.values())[0]
+
+                cols_map = {str(c).lower().strip(): c for c in sheet.columns}
+                def find(names):
+                    for n in names:
+                        for k,v in cols_map.items():
+                            if n in k: return v
+                    return None
+
+                c_prod = find(['produto','nome','descricao','descrição','item'])
+                c_preco = find(['valor revenda','revenda','preco','preço','valor'])
+                c_est = find(['estoque','qtd','quantidade','colunas1','saldo'])
+
+                count = 0
+                for _, row in sheet.iterrows():
+                    try:
+                        nome = str(row[c_prod]).strip() if c_prod else ""
+                    except: continue
+                    if not nome or nome.lower() in ['nan','none',''] or 'total' in nome.lower(): continue
+                    try:
+                        preco = float(row[c_preco]) if c_preco else 0.0
+                    except:
+                        preco = 0.0
+                    try:
+                        estoque = int(float(row[c_est])) if c_est else 0
+                    except:
+                        estoque = 0
+                    if preco <= 0 and estoque <=0: continue
+
+                    # verifica se já existe
+                    if USE_POSTGRES:
+                        cur.execute("SELECT id FROM produtos WHERE UPPER(nome)=UPPER(%s)", (nome,))
+                    else:
+                        cur.execute("SELECT id FROM produtos WHERE UPPER(nome)=UPPER(?)", (nome,))
+                    existe = cur.fetchone()
+                    if existe:
+                        if USE_POSTGRES:
+                            cur.execute("UPDATE produtos SET preco=%s, estoque=%s WHERE UPPER(nome)=UPPER(%s)", (preco, estoque, nome))
+                        else:
+                            cur.execute("UPDATE produtos SET preco=?, estoque=? WHERE UPPER(nome)=UPPER(?)", (preco, estoque, nome))
+                    else:
+                        if USE_POSTGRES:
+                            cur.execute("INSERT INTO produtos (nome, preco, estoque) VALUES (%s,%s,%s)", (nome, preco, estoque))
+                        else:
+                            cur.execute("INSERT INTO produtos (nome, preco, estoque) VALUES (?,?,?)", (nome, preco, estoque))
+                        count+=1
+                conn.commit()
+                msg = f"<div class='alert alert-success'>✅ {count} produtos novos importados! Planilha lida: {len(sheet)} linhas. Produtos existentes foram atualizados.</div>"
+            except Exception as e:
+                msg = f"<div class='alert alert-danger'>❌ Erro ao importar: {e}</div>"
+        else:
+            # ADD MANUAL
+            if USE_POSTGRES: cur.execute("INSERT INTO produtos (nome, preco, estoque) VALUES (%s,%s,%s)", (request.form['nome'], request.form['preco'], request.form['estoque']))
+            else: cur.execute("INSERT INTO produtos (nome, preco, estoque) VALUES (?,?,?)", (request.form['nome'], request.form['preco'], request.form['estoque']))
+            conn.commit(); conn.close(); return redirect('/produtos')
+
     cur.execute("SELECT * FROM produtos ORDER BY id DESC"); rows = cur.fetchall(); conn.close()
     linhas=""
     for r in rows:
         id_, nome, preco, est = (r[0], r[1], r[2], r[3]) if USE_POSTGRES else (r['id'], r['nome'], r['preco'], r['estoque'])
         linhas+=f"<tr><td>{nome}</td><td>R$ {float(preco or 0):.2f}</td><td>{est}</td><td><a href='/editar_produto/{id_}' class='btn btn-sm btn-dark2' style='margin-right:4px;'>✏️</a><a href='/excluir_produto/{id_}' class='btn btn-sm btn-danger'>X</a></td></tr>"
     html = f"""
+    {msg}
     <div class="card-dark p-4">
-    <h5 class="fw-bold mb-3">Produtos</h5>
+    <h5 class="fw-bold mb-3">Produtos ({len(rows)})</h5>
     <form method="POST" class="row g-2 mb-4">
       <div class="col-md-5"><input name="nome" class="form-control bg-dark text-white border-secondary" placeholder="Nome" required></div>
       <div class="col-md-3"><input name="preco" type="number" step="0.01" class="form-control bg-dark text-white border-secondary" placeholder="Preço" required></div>
       <div class="col-md-2"><input name="estoque" type="number" class="form-control bg-dark text-white border-secondary" placeholder="Est" required></div>
       <div class="col-md-2"><button class="btn btn-yellow w-100">+ Add</button></div>
     </form>
+
+    <div class="row g-2 mb-4">
+      <div class="col-md-6">
+        <div style="background:#1a1a00; border:2px dashed #f7b500; padding:12px; border-radius:10px">
+          <h6 class="fw-bold" style="color:#f7b500">📥 Importar Planilha</h6>
+          <p class="small-label">Use sua PLANILHA_OFICINA_CERTA.xlsx - lê PRODUTO / VALOR REVENDA / ESTOQUE automaticamente</p>
+          <form method="POST" enctype="multipart/form-data" class="d-flex gap-2">
+            <input type="file" name="arquivo" accept=".xlsx,.xls" class="form-control bg-dark text-white border-secondary" required>
+            <button class="btn btn-yellow">IMPORTAR</button>
+          </form>
+        </div>
+      </div>
+      <div class="col-md-6">
+        <div style="background:#0a1a0a; border:2px dashed #22c55e; padding:12px; border-radius:10px">
+          <h6 class="fw-bold" style="color:#22c55e">📤 Exportar Planilha</h6>
+          <p class="small-label">Baixa todos os {len(rows)} produtos em Excel para backup ou edição</p>
+          <a href="/exportar_produtos" class="btn btn-dark2 w-100" style="background:#22c55e; color:black; font-weight:800">📊 BAIXAR EXCEL PRODUTOS</a>
+        </div>
+      </div>
+    </div>
+
     <table class="table"><thead><tr><th>Nome</th><th>Preço</th><th>Est</th><th>Ações</th></tr></thead><tbody>{linhas}</tbody></table>
     </div>
     """
@@ -439,7 +530,7 @@ def historico():
         linhas+=f"<tr><td>{s['data']}</td><td><b>{s['cliente']}</b><br><span class='small-label'>{s['veiculo']} {s['placa']}</span></td><td>{s['descricao']}<br><span class='small-label' style='color:#f7b500'>{s['prod']}</span></td><td>R$ {float(s['valor'] or 0):.2f}</td><td><a href='/imprimir/{s['id']}' target='_blank' class='btn btn-sm btn-dark2'>🖨️</a> <a href='/editar_servico/{s['id']}' class='btn btn-sm btn-dark2'>✏️</a> <a href='/excluir_servico/{s['id']}' class='btn btn-sm btn-danger'>🗑️</a></td></tr>"
     html = f"""
     <div class="card-dark p-4">
-    <div class="d-flex justify-content-between align-items-center mb-3"><h5 class="fw-bold m-0">Histórico Completo</h5><a href="/exportar_excel" class="btn btn-yellow btn-sm">📊 Excel</a></div>
+    <div class="d-flex justify-content-between align-items-center mb-3"><h5 class="fw-bold m-0">Histórico Completo</h5><div class="d-flex gap-2"><a href="/exportar_excel" class="btn btn-yellow btn-sm">📊 Excel OS</a><a href="/exportar_produtos" class="btn btn-dark2 btn-sm">📦 Excel Produtos</a></div></div>
     <form method="GET" class="mb-3">
       <div class="input-group"><input name="q" value="{q}" class="form-control bg-dark text-white border-secondary" placeholder="Pesquisar cliente, placa..."><button class="btn btn-yellow">Buscar</button></div>
     </form>
@@ -469,6 +560,39 @@ def exportar_excel():
             output += f"\"{s['data']}\",\"{s['cliente']}\",\"{s['placa']}\",\"{s['veiculo']}\",\"{s['descricao']}\",\"{s['prod']}\",{s['valor']}\n"
         bio = BytesIO(output.encode('utf-8'))
         return send_file(bio, as_attachment=True, download_name="oficina.csv", mimetype="text/csv")
+
+@app.route('/exportar_produtos')
+def exportar_produtos():
+    init_db()
+    conn = get_conn(); cur = conn.cursor()
+    cur.execute("SELECT * FROM produtos ORDER BY nome ASC")
+    rows = cur.fetchall()
+    conn.close()
+    try:
+        import openpyxl
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Produtos"
+        ws.append(["ID","PRODUTO","VALOR REVENDA","ESTOQUE"])
+        for r in rows:
+            id_, nome, preco, est = (r[0], r[1], r[2], r[3]) if USE_POSTGRES else (r['id'], r['nome'], r['preco'], r['estoque'])
+            ws.append([id_, nome, float(preco or 0), int(est or 0)])
+        # Ajusta largura
+        ws.column_dimensions['B'].width = 45
+        ws.column_dimensions['C'].width = 18
+        ws.column_dimensions['D'].width = 12
+        bio = BytesIO()
+        wb.save(bio)
+        bio.seek(0)
+        return send_file(bio, as_attachment=True, download_name=f"produtos_oficina_{datetime.now().strftime('%d-%m-%Y')}.xlsx", mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    except Exception as e:
+        # fallback CSV
+        output = "ID,PRODUTO,VALOR REVENDA,ESTOQUE\n"
+        for r in rows:
+            id_, nome, preco, est = (r[0], r[1], r[2], r[3]) if USE_POSTGRES else (r['id'], r['nome'], r['preco'], r['estoque'])
+            output += f"{id_},\"{nome}\",{preco},{est}\n"
+        bio = BytesIO(output.encode('utf-8'))
+        return send_file(bio, as_attachment=True, download_name="produtos_oficina.csv", mimetype="text/csv")
 
 @app.route('/imprimir/<int:id>')
 def imprimir(id):
