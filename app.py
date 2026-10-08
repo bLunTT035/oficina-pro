@@ -132,50 +132,56 @@ def produtos():
     conn = get_conn(); cur = conn.cursor()
     msg = ""
     if request.method == 'POST':
-        # IMPORTAR PLANILHA
         if 'arquivo' in request.files and request.files['arquivo'].filename!= '':
             file = request.files['arquivo']
             try:
-                import pandas as pd
-                df_dict = pd.read_excel(file, sheet_name=None)
-                # acha aba com PRODUTO
+                import openpyxl
+                wb = openpyxl.load_workbook(file)
                 sheet = None
-                for name in df_dict:
-                    cols_up = [str(c).upper() for c in df_dict[name].columns]
-                    if any('PRODUTO' in c or 'NOME' in c for c in cols_up):
-                        sheet = df_dict[name]
+                for name in wb.sheetnames:
+                    ws_tmp = wb[name]
+                    headers_tmp = [str(ws_tmp.cell(1, c).value or '').upper() for c in range(1, 10)]
+                    if any('PRODUTO' in h or 'NOME' in h for h in headers_tmp):
+                        sheet = ws_tmp
                         break
                 if sheet is None:
-                    sheet = list(df_dict.values())[0]
+                    sheet = wb.active
 
-                cols_map = {str(c).lower().strip(): c for c in sheet.columns}
-                def find(names):
+                headers = {}
+                for c in range(1, sheet.max_column+1):
+                    val = str(sheet.cell(1, c).value or '').lower().strip()
+                    headers[val] = c
+
+                def find_col(names):
                     for n in names:
-                        for k,v in cols_map.items():
-                            if n in k: return v
+                        for h, col in headers.items():
+                            if n in h:
+                                return col
                     return None
 
-                c_prod = find(['produto','nome','descricao','descrição','item'])
-                c_preco = find(['valor revenda','revenda','preco','preço','valor'])
-                c_est = find(['estoque','qtd','quantidade','colunas1','saldo'])
+                c_prod = find_col(['produto','nome','descricao','descrição','item'])
+                c_preco = find_col(['valor revenda','revenda','preco','preço','valor','price'])
+                c_est = find_col(['estoque','qtd','quantidade','colunas1','saldo','est'])
+
+                if not c_prod: c_prod = 1
+                if not c_preco: c_preco = 2
 
                 count = 0
-                for _, row in sheet.iterrows():
+                for r in range(2, sheet.max_row+1):
+                    nome = str(sheet.cell(r, c_prod).value or '').strip()
+                    if not nome or nome.lower() in ['none','nan',''] or 'total' in nome.lower():
+                        continue
                     try:
-                        nome = str(row[c_prod]).strip() if c_prod else ""
-                    except: continue
-                    if not nome or nome.lower() in ['nan','none',''] or 'total' in nome.lower(): continue
-                    try:
-                        preco = float(row[c_preco]) if c_preco else 0.0
+                        preco = float(sheet.cell(r, c_preco).value or 0)
                     except:
                         preco = 0.0
                     try:
-                        estoque = int(float(row[c_est])) if c_est else 0
+                        estoque = int(float(sheet.cell(r, c_est).value or 0)) if c_est else 0
                     except:
                         estoque = 0
-                    if preco <= 0 and estoque <=0: continue
+                    if preco <= 0 and estoque <= 0:
+                        continue
 
-                    # verifica se já existe
                     if USE_POSTGRES:
                         cur.execute("SELECT id FROM produtos WHERE UPPER(nome)=UPPER(%s)", (nome,))
                     else:
@@ -193,11 +199,10 @@ def produtos():
                             cur.execute("INSERT INTO produtos (nome, preco, estoque) VALUES (?,?,?)", (nome, preco, estoque))
                         count+=1
                 conn.commit()
-                msg = f"<div class='alert alert-success'>✅ {count} produtos novos importados! Planilha lida: {len(sheet)} linhas. Produtos existentes foram atualizados.</div>"
+                msg = f"<div class='alert alert-success'>✅ {count} produtos novos importados! {sheet.max_row-1} linhas lidas. Produtos existentes foram atualizados.</div>"
             except Exception as e:
                 msg = f"<div class='alert alert-danger'>❌ Erro ao importar: {e}</div>"
         else:
-            # ADD MANUAL
             if USE_POSTGRES: cur.execute("INSERT INTO produtos (nome, preco, estoque) VALUES (%s,%s,%s)", (request.form['nome'], request.form['preco'], request.form['estoque']))
             else: cur.execute("INSERT INTO produtos (nome, preco, estoque) VALUES (?,?,?)", (request.form['nome'], request.form['preco'], request.form['estoque']))
             conn.commit(); conn.close(); return redirect('/produtos')
@@ -232,13 +237,13 @@ def produtos():
       <div class="col-md-6">
         <div style="background:#0a1a0a; border:2px dashed #22c55e; padding:12px; border-radius:10px">
           <h6 class="fw-bold" style="color:#22c55e">📤 Exportar Planilha</h6>
-          <p class="small-label">Baixa todos os {len(rows)} produtos em Excel para backup ou edição</p>
-          <a href="/exportar_produtos" class="btn btn-dark2 w-100" style="background:#22c55e; color:black; font-weight:800">📊 BAIXAR EXCEL PRODUTOS</a>
+          <p class="small-label">Baixa todos os {len(rows)} produtos em Excel para backup</p>
+          <a href="/exportar_produtos" class="btn w-100" style="background:#22c55e; color:black; font-weight:800">📊 BAIXAR EXCEL PRODUTOS</a>
         </div>
       </div>
     </div>
 
-    <table class="table"><thead><tr><th>Nome</th><th>Preço</th><th>Est</th><th>Ações</th></tr></thead><tbody>{linhas}</tbody></table>
+    <table class="table"><thead><tr><th>Nome</th><th>Preço</th><th>Est</th><th>Ações</th></tr></thead><tbody>{linhas if linhas else '<tr><td colspan=4 class=small-label>Nenhum produto ainda</td></tr>'}</tbody></table>
     </div>
     """
     return render_template_string(BASE, content=html)
@@ -263,7 +268,7 @@ def editar_produto(id):
       <form method="POST" class="row g-3">
         <div class="col-md-6"><label class="small-label">Nome</label><input name="nome" value="{nome}" class="form-control bg-dark text-white border-secondary" required></div>
         <div class="col-md-3"><label class="small-label">Preço</label><input name="preco" type="number" step="0.01" value="{preco}" class="form-control bg-dark text-white border-secondary" required></div>
-        <div class="col-md-3"><label class="small-label">Estoque (quantidade)</label><input name="estoque" type="number" value="{est}" class="form-control bg-dark text-white border-secondary" required></div>
+        <div class="col-md-3"><label class="small-label">Estoque</label><input name="estoque" type="number" value="{est}" class="form-control bg-dark text-white border-secondary" required></div>
         <div class="col-12"><button class="btn btn-yellow w-100">SALVAR EDIÇÃO</button><a href="/produtos" class="btn btn-dark2 w-100 mt-2">Cancelar</a></div>
       </form>
     </div>
@@ -309,12 +314,10 @@ def nova_os():
                     else: cur.execute("UPDATE produtos SET estoque = estoque -? WHERE id=?", (qty, int(pid),))
             except Exception as e: print(e); pass
         prod_txt = ", ".join(nomes_usados)
-        desc_final = f"{descricao}"
         carro_full = f"{veiculo} - {placa}".strip(" -")
-        if USE_POSTGRES: cur.execute("INSERT INTO servicos (cliente, carro, placa, veiculo, descricao, valor, data, produtos_usados) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)", (cliente, carro_full, placa, veiculo, desc_final, valor, data, prod_txt))
-        else: cur.execute("INSERT INTO servicos (cliente, placa, veiculo, carro, descricao, valor, data, produtos_usados) VALUES (?,?,?,?,?,?,?,?)", (cliente, placa, veiculo, carro_full, desc_final, valor, data, prod_txt))
+        if USE_POSTGRES: cur.execute("INSERT INTO servicos (cliente, carro, placa, veiculo, descricao, valor, data, produtos_usados) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)", (cliente, carro_full, placa, veiculo, descricao, valor, data, prod_txt))
+        else: cur.execute("INSERT INTO servicos (cliente, placa, veiculo, carro, descricao, valor, data, produtos_usados) VALUES (?,?,?,?,?,?,?,?)", (cliente, placa, veiculo, carro_full, descricao, valor, data, prod_txt))
         conn.commit(); conn.close(); return redirect('/')
-
     lista_prod_html=""
     for r in produtos:
         id_, nome, preco, est = (r[0], r[1], r[2], r[3]) if USE_POSTGRES else (r['id'], r['nome'], r['preco'], r['estoque'])
@@ -327,7 +330,7 @@ def nova_os():
               <input type="number" id="qty-{id_}" name="qty_{id_}" value="1" min="1" oninput="calcTotal()" onclick="event.stopPropagation()">
               <button type="button" class="qty-btn" onclick="changeQty({id_},1)">+</button>
             </div>
-            <span class="small-label" id="check-{id_}">✓</span>
+            <span class="small-label">✓</span>
           </div>
         </div>
         """
@@ -335,7 +338,7 @@ def nova_os():
     conn.close()
     html = f"""
     <div class="card-dark p-4">
-    <h5 class="fw-bold mb-3">+ Nova OS - Cálculo Automático (com quantidade)</h5>
+    <h5 class="fw-bold mb-3">+ Nova OS</h5>
     <form method="POST">
       <div class="row g-3">
         <div class="col-md-6"><label class="small-label">Cliente *</label><input name="cliente" class="form-control bg-dark text-white border-secondary" required></div>
@@ -345,7 +348,7 @@ def nova_os():
         <div class="col-md-4"><label class="small-label">Mão de Obra R$</label><input id="valor_mao" type="number" step="0.01" class="form-control bg-dark text-white border-secondary" placeholder="0.00" oninput="calcTotal()"></div>
         <div class="col-md-4"><label class="small-label">Total Automático</label><input id="valor_total" name="valor_total" type="number" step="0.01" class="form-control bg-dark text-white border-secondary" style="border-color:#f7b500!important;font-weight:bold" readonly><div id="valor_display" class="small-label mt-1" style="color:#f7b500">R$ 0.00</div></div>
       </div>
-      <div class="mt-4"><label class="small-label fw-bold">Produtos usados (clique e escolha a quantidade)</label><div class="mt-2" style="max-height:380px;overflow-y:auto">{lista_prod_html}</div></div>
+      <div class="mt-4"><label class="small-label fw-bold">Produtos usados</label><div class="mt-2" style="max-height:380px;overflow-y:auto">{lista_prod_html}</div></div>
       <button class="btn btn-yellow w-100 py-3 mt-4">SALVAR SERVIÇO - <span id="valor_display2">R$ 0.00</span></button>
     </form>
     </div>
@@ -397,7 +400,6 @@ def editar_servico(id):
         s_id, s_cliente, s_placa, s_veiculo, s_carro, s_desc, s_valor, s_data, s_prod = r
     else:
         s_id=r['id']; s_cliente=r['cliente']; s_placa=r['placa']; s_veiculo=r['veiculo']; s_carro=r['carro']; s_desc=r['descricao']; s_valor=r['valor']; s_data=r['data']; s_prod=r['produtos_usados']
-
     produtos_existentes = {}
     if s_prod:
         for part in s_prod.split(','):
@@ -408,19 +410,14 @@ def editar_servico(id):
                 produtos_existentes[m.group(2).strip().upper()] = int(m.group(1))
             else:
                 produtos_existentes[part.strip().upper()] = 1
-
     if request.method == 'POST':
-        cliente = request.form.get('cliente','')
-        placa = request.form.get('placa','')
-        veiculo = request.form.get('veiculo','')
-        descricao = request.form.get('descricao','')
-        valor = request.form.get('valor_total') or request.form.get('valor') or 0
+        cliente = request.form.get('cliente',''); placa = request.form.get('placa',''); veiculo = request.form.get('veiculo','')
+        descricao = request.form.get('descricao',''); valor = request.form.get('valor_total') or request.form.get('valor') or 0
         selecionados = request.form.getlist('produtos')
         nomes_usados=[]
         for pid in selecionados:
             try:
                 qty = int(request.form.get(f'qty_{pid}', '1') or 1)
-                if qty < 1: qty=1
                 if USE_POSTGRES: cur.execute("SELECT nome FROM produtos WHERE id=%s", (int(pid),))
                 else: cur.execute("SELECT nome FROM produtos WHERE id=?", (int(pid),))
                 prow = cur.fetchone()
@@ -432,11 +429,9 @@ def editar_servico(id):
         if USE_POSTGRES: cur.execute("UPDATE servicos SET cliente=%s, placa=%s, veiculo=%s, descricao=%s, valor=%s, produtos_usados=%s WHERE id=%s", (cliente, placa, veiculo, descricao, valor, prod_txt, id))
         else: cur.execute("UPDATE servicos SET cliente=?, placa=?, veiculo=?, descricao=?, valor=?, produtos_usados=? WHERE id=?", (cliente, placa, veiculo, descricao, valor, prod_txt, id))
         conn.commit(); conn.close(); return redirect('/historico')
-
     cur.execute("SELECT * FROM produtos ORDER BY nome ASC")
     produtos_all = cur.fetchall()
     conn.close()
-
     lista_prod_html=""
     for prod_r in produtos_all:
         pid, nome, preco, est = (prod_r[0], prod_r[1], prod_r[2], prod_r[3]) if USE_POSTGRES else (prod_r['id'], prod_r['nome'], prod_r['preco'], prod_r['estoque'])
@@ -459,23 +454,19 @@ def editar_servico(id):
           </div>
         </div>
         """
-    if not lista_prod_html:
-        lista_prod_html = "<div class='small-label'>Nenhum produto cadastrado.</div>"
-
     html = f"""
     <div class="card-dark p-4">
-    <h5 class="fw-bold mb-3">Editar OS #{s_id} - Editar Quantidade</h5>
+    <h5 class="fw-bold mb-3">Editar OS #{s_id}</h5>
     <form method="POST">
       <div class="row g-3">
         <div class="col-md-6"><label class="small-label">Cliente</label><input name="cliente" value="{s_cliente}" class="form-control bg-dark text-white border-secondary" required></div>
         <div class="col-md-3"><label class="small-label">Placa</label><input name="placa" value="{s_placa}" class="form-control bg-dark text-white border-secondary"></div>
         <div class="col-md-3"><label class="small-label">Veículo</label><input name="veiculo" value="{s_veiculo or s_carro or ''}" class="form-control bg-dark text-white border-secondary"></div>
         <div class="col-12"><label class="small-label">O que foi feito</label><textarea name="descricao" rows="3" class="form-control bg-dark text-white border-secondary" required>{s_desc}</textarea></div>
-        <div class="col-md-4"><label class="small-label">Mão de Obra R$</label><input id="valor_mao" type="number" step="0.01" class="form-control bg-dark text-white border-secondary" placeholder="0.00" oninput="calcTotal()"></div>
-        <div class="col-md-4"><label class="small-label">Total Automático</label><input id="valor_total" name="valor_total" type="number" step="0.01" value="{s_valor}" class="form-control bg-dark text-white border-secondary" style="border-color:#f7b500!important;font-weight:bold" readonly><div id="valor_display" class="small-label mt-1" style="color:#f7b500">R$ {float(s_valor or 0):.2f}</div></div>
+        <div class="col-md-4"><label class="small-label">Total</label><input id="valor_total" name="valor_total" type="number" step="0.01" value="{s_valor}" class="form-control bg-dark text-white border-secondary" readonly><div id="valor_display" class="small-label mt-1">R$ {float(s_valor or 0):.2f}</div></div>
       </div>
-      <div class="mt-4"><label class="small-label fw-bold">Produtos usados (já marcado o que foi usado, pode mudar quantidade)</label><div class="mt-2" style="max-height:380px;overflow-y:auto">{lista_prod_html}</div></div>
-      <button class="btn btn-yellow w-100 py-3 mt-4">SALVAR EDIÇÃO - <span id="valor_display2">R$ {float(s_valor or 0):.2f}</span></button>
+      <div class="mt-4"><label class="small-label fw-bold">Produtos usados</label><div class="mt-2" style="max-height:380px;overflow-y:auto">{lista_prod_html}</div></div>
+      <button class="btn btn-yellow w-100 py-3 mt-4">SALVAR EDIÇÃO</button>
       <a href="/historico" class="btn btn-dark2 w-100 mt-2">Cancelar</a>
     </form>
     </div>
@@ -487,33 +478,21 @@ def editar_servico(id):
       el.classList.toggle('selected');
       chk.checked = el.classList.contains('selected');
       qtybox.style.display = chk.checked? 'flex' : 'none';
-      if(!chk.checked){{ document.getElementById('qty-'+id).value=1; }}
       calcTotal();
     }}
     function changeQty(id, delta){{
       const inp=document.getElementById('qty-'+id);
-      let v=parseInt(inp.value)||1;
-      v+=delta;
-      if(v<1) v=1;
-      inp.value=v;
-      calcTotal();
+      let v=parseInt(inp.value)||1; v+=delta; if(v<1) v=1; inp.value=v; calcTotal();
     }}
     function calcTotal(){{
-      let t=parseFloat(document.getElementById('valor_mao').value)||0;
+      let t=0;
       document.querySelectorAll('.produto-item.selected').forEach(item=>{{
         const id=item.id.replace('item-','');
         const preco=parseFloat(item.dataset.preco)||0;
         const qty=parseInt(document.getElementById('qty-'+id).value)||1;
         t+=preco*qty;
       }});
-      const totalInput = document.getElementById('valor_total');
-      if(t>0 || document.querySelectorAll('.produto-item.selected').length>0 || document.getElementById('valor_mao').value){{
-        totalInput.value=t.toFixed(2);
-        document.getElementById('valor_display').innerText='R$ '+t.toFixed(2);
-        document.getElementById('valor_display2').innerText='R$ '+t.toFixed(2);
-      }} else {{
-        totalInput.value=t.toFixed(2);
-      }}
+      document.getElementById('valor_total').value=t.toFixed(2);
     }}
     calcTotal();
     </script>
@@ -530,10 +509,8 @@ def historico():
         linhas+=f"<tr><td>{s['data']}</td><td><b>{s['cliente']}</b><br><span class='small-label'>{s['veiculo']} {s['placa']}</span></td><td>{s['descricao']}<br><span class='small-label' style='color:#f7b500'>{s['prod']}</span></td><td>R$ {float(s['valor'] or 0):.2f}</td><td><a href='/imprimir/{s['id']}' target='_blank' class='btn btn-sm btn-dark2'>🖨️</a> <a href='/editar_servico/{s['id']}' class='btn btn-sm btn-dark2'>✏️</a> <a href='/excluir_servico/{s['id']}' class='btn btn-sm btn-danger'>🗑️</a></td></tr>"
     html = f"""
     <div class="card-dark p-4">
-    <div class="d-flex justify-content-between align-items-center mb-3"><h5 class="fw-bold m-0">Histórico Completo</h5><div class="d-flex gap-2"><a href="/exportar_excel" class="btn btn-yellow btn-sm">📊 Excel OS</a><a href="/exportar_produtos" class="btn btn-dark2 btn-sm">📦 Excel Produtos</a></div></div>
-    <form method="GET" class="mb-3">
-      <div class="input-group"><input name="q" value="{q}" class="form-control bg-dark text-white border-secondary" placeholder="Pesquisar cliente, placa..."><button class="btn btn-yellow">Buscar</button></div>
-    </form>
+    <div class="d-flex justify-content-between align-items-center mb-3"><h5 class="fw-bold m-0">Histórico</h5><div class="d-flex gap-2"><a href="/exportar_excel" class="btn btn-yellow btn-sm">📊 Excel OS</a><a href="/exportar_produtos" class="btn btn-dark2 btn-sm">📦 Excel Produtos</a></div></div>
+    <form method="GET" class="mb-3"><div class="input-group"><input name="q" value="{q}" class="form-control bg-dark text-white border-secondary" placeholder="Pesquisar..."><button class="btn btn-yellow">Buscar</button></div></form>
     <table class="table"><thead><tr><th>Data</th><th>Cliente</th><th>Feito</th><th>Valor</th><th>Ações</th></tr></thead><tbody>{linhas if linhas else '<tr><td colspan=5 class=small-label>Nenhum resultado</td></tr>'}</tbody></table>
     </div>
     """
@@ -568,31 +545,19 @@ def exportar_produtos():
     cur.execute("SELECT * FROM produtos ORDER BY nome ASC")
     rows = cur.fetchall()
     conn.close()
-    try:
-        import openpyxl
-        wb = openpyxl.Workbook()
-        ws = wb.active
-        ws.title = "Produtos"
-        ws.append(["ID","PRODUTO","VALOR REVENDA","ESTOQUE"])
-        for r in rows:
-            id_, nome, preco, est = (r[0], r[1], r[2], r[3]) if USE_POSTGRES else (r['id'], r['nome'], r['preco'], r['estoque'])
-            ws.append([id_, nome, float(preco or 0), int(est or 0)])
-        # Ajusta largura
-        ws.column_dimensions['B'].width = 45
-        ws.column_dimensions['C'].width = 18
-        ws.column_dimensions['D'].width = 12
-        bio = BytesIO()
-        wb.save(bio)
-        bio.seek(0)
-        return send_file(bio, as_attachment=True, download_name=f"produtos_oficina_{datetime.now().strftime('%d-%m-%Y')}.xlsx", mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    except Exception as e:
-        # fallback CSV
-        output = "ID,PRODUTO,VALOR REVENDA,ESTOQUE\n"
-        for r in rows:
-            id_, nome, preco, est = (r[0], r[1], r[2], r[3]) if USE_POSTGRES else (r['id'], r['nome'], r['preco'], r['estoque'])
-            output += f"{id_},\"{nome}\",{preco},{est}\n"
-        bio = BytesIO(output.encode('utf-8'))
-        return send_file(bio, as_attachment=True, download_name="produtos_oficina.csv", mimetype="text/csv")
+    import openpyxl
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Produtos"
+    ws.append(["ID","PRODUTO","VALOR REVENDA","ESTOQUE"])
+    for r in rows:
+        id_, nome, preco, est = (r[0], r[1], r[2], r[3]) if USE_POSTGRES else (r['id'], r['nome'], r['preco'], r['estoque'])
+        ws.append([id_, nome, float(preco or 0), int(est or 0)])
+    ws.column_dimensions['B'].width = 45
+    bio = BytesIO()
+    wb.save(bio)
+    bio.seek(0)
+    return send_file(bio, as_attachment=True, download_name=f"produtos_oficina_{datetime.now().strftime('%d-%m-%Y')}.xlsx", mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 @app.route('/imprimir/<int:id>')
 def imprimir(id):
@@ -610,12 +575,11 @@ def imprimir(id):
     <!doctype html><html><head><meta charset="utf-8"><title>OS #{s['id']}</title>
     <style>body{{font-family:Arial;padding:30px}}.header{{border-bottom:3px solid #f7b500;padding-bottom:15px;margin-bottom:20px}}.box{{border:1px solid #ddd;padding:15px;border-radius:8px;margin-bottom:15px}}.btn{{background:#f7b500;color:#000;padding:10px 20px;border:none;border-radius:6px;font-weight:bold;cursor:pointer}} @media print{{.no-print{{display:none}}}}</style>
     </head><body>
-    <div class="header"><h2>OFICINA PRO - ORDEM DE SERVIÇO #{s['id']}</h2><p>Data: {s['data']}</p></div>
+    <div class="header"><h2>OFICINA PRO - OS #{s['id']}</h2><p>{s['data']}</p></div>
     <div class="box"><b>Cliente:</b> {s['cliente']}<br><b>Veículo:</b> {s['veiculo']}<br><b>Placa:</b> {s['placa']}</div>
-    <div class="box"><b>Serviço Executado:</b><br>{s['descricao']}<br><br><b>Produtos Usados:</b> {s['prod']}</div>
-    <div class="box"><h3>Valor Total: R$ {float(s['valor'] or 0):.2f}</h3></div>
-    <div class="box" style="margin-top:40px"><br><br>Assinatura do Cliente: ___________________________________<br><br><br>Assinatura da Oficina: __________________________________</div>
-    <div class="no-print" style="margin-top:20px"><button class="btn" onclick="window.print()">🖨️ IMPRIMIR / SALVAR EM PDF</button> <a href="/historico" class="btn" style="background:#333;color:#fff;text-decoration:none">Voltar</a></div>
+    <div class="box"><b>Serviço:</b><br>{s['descricao']}<br><br><b>Produtos:</b> {s['prod']}</div>
+    <div class="box"><h3>R$ {float(s['valor'] or 0):.2f}</h3></div>
+    <div class="no-print"><button class="btn" onclick="window.print()">🖨️ IMPRIMIR</button></div>
     </body></html>
     """
     return html_print
