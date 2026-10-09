@@ -1,5 +1,6 @@
 import os
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from flask import Flask, render_template_string, request, redirect, send_file
 import sqlite3
 from io import BytesIO
@@ -22,6 +23,9 @@ def get_conn():
         conn = sqlite3.connect('oficina.db')
         conn.row_factory = sqlite3.Row
         return conn
+
+def get_horario_brasilia():
+    return datetime.now(ZoneInfo("America/Sao_Paulo")).strftime("%d/%m/%Y %H:%M")
 
 def init_db():
     conn = get_conn()
@@ -80,6 +84,7 @@ body{background:#0e0e0e;color:#fff;font-family:Inter,Arial}
 .qty-box{display:none; align-items:center; gap:6px;}
 .qty-box input{width:55px; text-align:center; background:#000; border:1px solid #f7b500; color:#f7b500; font-weight:900; border-radius:6px; padding:4px;}
 .qty-btn{background:#f7b500; color:#000; border:none; width:28px; height:28px; border-radius:6px; font-weight:900;}
+.total-editavel{background:#000!important;border-color:#f7b500!important;color:#f7b500!important;}
 </style>
 </head><body>
 <nav class="navbar d-flex justify-content-between">
@@ -111,7 +116,7 @@ def index():
     servicos = buscar_servicos()[:8]
     linhas=""
     for s in servicos:
-        linhas+=f"<tr><td>{s['data']}</td><td><b>{s['cliente']}</b><br><span class='small-label'>{s['veiculo']} {s['placa']}</span></td><td>{s['descricao']}<br><span class='small-label' style='color:#f7b500'>{s['prod']}</span></td><td>R$ {float(s['valor']):.2f}</td><td><a href='/imprimir/{s['id']}' target='_blank' class='btn btn-sm btn-dark2'>🖨️</a> <a href='/editar_servico/{s['id']}' class='btn btn-sm btn-dark2'>✏️</a> <a href='/excluir_servico/{s['id']}' class='btn btn-sm btn-danger'>🗑️</a></td></tr>"
+        linhas+=f"<tr><td>{s['data']}</td><td><b>{s['cliente']}</b><br><span class='small-label'>{s['veiculo']} {s['placa']}</span></td><td style='white-space:pre-wrap'>{s['descricao']}<br><span class='small-label' style='color:#f7b500'>{s['prod']}</span></td><td style='white-space:nowrap'>R$ {float(s['valor']):.2f}</td><td><a href='/imprimir/{s['id']}' target='_blank' class='btn btn-sm btn-dark2'>🖨️</a> <a href='/editar_servico/{s['id']}' class='btn btn-sm btn-dark2'>✏️</a> <a href='/excluir_servico/{s['id']}' class='btn btn-sm btn-danger'>🗑️</a></td></tr>"
     html = f"""
     <div class="row g-3">
       <div class="col-6"><div class="card-dark p-4"><div class="big-number">{total_serv}</div><div class="small-label mt-2">Serviços</div></div></div>
@@ -146,26 +151,21 @@ def produtos():
                         break
                 if sheet is None:
                     sheet = wb.active
-
                 headers = {}
                 for c in range(1, sheet.max_column+1):
                     val = str(sheet.cell(1, c).value or '').lower().strip()
                     headers[val] = c
-
                 def find_col(names):
                     for n in names:
                         for h, col in headers.items():
                             if n in h:
                                 return col
                     return None
-
                 c_prod = find_col(['produto','nome','descricao','descrição','item'])
                 c_preco = find_col(['valor revenda','revenda','preco','preço','valor','price'])
                 c_est = find_col(['estoque','qtd','quantidade','colunas1','saldo','est'])
-
                 if not c_prod: c_prod = 1
                 if not c_preco: c_preco = 2
-
                 count = 0
                 for r in range(2, sheet.max_row+1):
                     nome = str(sheet.cell(r, c_prod).value or '').strip()
@@ -181,7 +181,6 @@ def produtos():
                         estoque = 0
                     if preco <= 0 and estoque <= 0:
                         continue
-
                     if USE_POSTGRES:
                         cur.execute("SELECT id FROM produtos WHERE UPPER(nome)=UPPER(%s)", (nome,))
                     else:
@@ -199,14 +198,13 @@ def produtos():
                             cur.execute("INSERT INTO produtos (nome, preco, estoque) VALUES (?,?,?)", (nome, preco, estoque))
                         count+=1
                 conn.commit()
-                msg = f"<div class='alert alert-success'>✅ {count} produtos novos importados! {sheet.max_row-1} linhas lidas. Produtos existentes foram atualizados.</div>"
+                msg = f"<div class='alert alert-success'>✅ {count} produtos novos importados! {sheet.max_row-1} linhas lidas.</div>"
             except Exception as e:
                 msg = f"<div class='alert alert-danger'>❌ Erro ao importar: {e}</div>"
         else:
             if USE_POSTGRES: cur.execute("INSERT INTO produtos (nome, preco, estoque) VALUES (%s,%s,%s)", (request.form['nome'], request.form['preco'], request.form['estoque']))
             else: cur.execute("INSERT INTO produtos (nome, preco, estoque) VALUES (?,?,?)", (request.form['nome'], request.form['preco'], request.form['estoque']))
             conn.commit(); conn.close(); return redirect('/produtos')
-
     cur.execute("SELECT * FROM produtos ORDER BY id DESC"); rows = cur.fetchall(); conn.close()
     linhas=""
     for r in rows:
@@ -222,27 +220,6 @@ def produtos():
       <div class="col-md-2"><input name="estoque" type="number" class="form-control bg-dark text-white border-secondary" placeholder="Est" required></div>
       <div class="col-md-2"><button class="btn btn-yellow w-100">+ Add</button></div>
     </form>
-
-    <div class="row g-2 mb-4">
-      <div class="col-md-6">
-        <div style="background:#1a1a00; border:2px dashed #f7b500; padding:12px; border-radius:10px">
-          <h6 class="fw-bold" style="color:#f7b500">📥 Importar Planilha</h6>
-          <p class="small-label">Use sua PLANILHA_OFICINA_CERTA.xlsx - lê PRODUTO / VALOR REVENDA / ESTOQUE automaticamente</p>
-          <form method="POST" enctype="multipart/form-data" class="d-flex gap-2">
-            <input type="file" name="arquivo" accept=".xlsx,.xls" class="form-control bg-dark text-white border-secondary" required>
-            <button class="btn btn-yellow">IMPORTAR</button>
-          </form>
-        </div>
-      </div>
-      <div class="col-md-6">
-        <div style="background:#0a1a0a; border:2px dashed #22c55e; padding:12px; border-radius:10px">
-          <h6 class="fw-bold" style="color:#22c55e">📤 Exportar Planilha</h6>
-          <p class="small-label">Baixa todos os {len(rows)} produtos em Excel para backup</p>
-          <a href="/exportar_produtos" class="btn w-100" style="background:#22c55e; color:black; font-weight:800">📊 BAIXAR EXCEL PRODUTOS</a>
-        </div>
-      </div>
-    </div>
-
     <table class="table"><thead><tr><th>Nome</th><th>Preço</th><th>Est</th><th>Ações</th></tr></thead><tbody>{linhas if linhas else '<tr><td colspan=4 class=small-label>Nenhum produto ainda</td></tr>'}</tbody></table>
     </div>
     """
@@ -298,7 +275,7 @@ def nova_os():
         cliente = request.form.get('cliente',''); placa = request.form.get('placa',''); veiculo = request.form.get('veiculo','')
         descricao = request.form.get('descricao',''); valor = request.form.get('valor_total','0') or 0
         selecionados = request.form.getlist('produtos')
-        data = datetime.now().strftime("%d/%m/%Y %H:%M")
+        data = get_horario_brasilia()
         nomes_usados=[]
         for pid in selecionados:
             try:
@@ -345,14 +322,43 @@ def nova_os():
         <div class="col-md-3"><label class="small-label">Placa</label><input name="placa" class="form-control bg-dark text-white border-secondary"></div>
         <div class="col-md-3"><label class="small-label">Veículo</label><input name="veiculo" class="form-control bg-dark text-white border-secondary"></div>
         <div class="col-12"><label class="small-label">O que foi feito *</label><textarea name="descricao" rows="3" class="form-control bg-dark text-white border-secondary" required></textarea></div>
-        <div class="col-md-4"><label class="small-label">Mão de Obra R$</label><input id="valor_mao" type="number" step="0.01" class="form-control bg-dark text-white border-secondary" placeholder="0.00" oninput="calcTotal()"></div>
-        <div class="col-md-4"><label class="small-label">Total Automático</label><input id="valor_total" name="valor_total" type="number" step="0.01" class="form-control bg-dark text-white border-secondary" style="border-color:#f7b500!important;font-weight:bold" readonly><div id="valor_display" class="small-label mt-1" style="color:#f7b500">R$ 0.00</div></div>
+        <div class="col-md-3"><label class="small-label">Mão de Obra R$</label><input id="valor_mao" type="number" step="0.01" class="form-control bg-dark text-white border-secondary" placeholder="0.00" oninput="calcTotal()"></div>
+        <div class="col-md-5">
+          <label class="small-label d-flex justify-content-between"><span>Total</span> <span id="status_auto" style="color:#f7b500;font-size:11px">Automático</span></label>
+          <div class="d-flex gap-2">
+            <input id="valor_total" name="valor_total" type="number" step="0.01" class="form-control bg-dark text-white border-secondary" style="border-color:#f7b500!important;font-weight:bold" readonly>
+            <button type="button" id="btnEditar" onclick="toggleEditar()" class="btn btn-dark2" style="white-space:nowrap">✏️ Editar</button>
+          </div>
+          <div id="valor_display" class="small-label mt-1" style="color:#f7b500">R$ 0.00</div>
+        </div>
       </div>
       <div class="mt-4"><label class="small-label fw-bold">Produtos usados</label><div class="mt-2" style="max-height:380px;overflow-y:auto">{lista_prod_html}</div></div>
       <button class="btn btn-yellow w-100 py-3 mt-4">SALVAR SERVIÇO - <span id="valor_display2">R$ 0.00</span></button>
     </form>
     </div>
     <script>
+    let modoManual = false;
+    function toggleEditar(){{
+      modoManual =!modoManual;
+      const input = document.getElementById('valor_total');
+      const btn = document.getElementById('btnEditar');
+      const status = document.getElementById('status_auto');
+      if(modoManual){{
+        input.removeAttribute('readonly');
+        input.classList.add('total-editavel');
+        input.focus();
+        btn.innerText = '🔒 Auto';
+        status.innerText = 'Editando manualmente';
+        status.style.color = '#22c55e';
+      }} else {{
+        input.setAttribute('readonly','readonly');
+        input.classList.remove('total-editavel');
+        btn.innerText = '✏️ Editar';
+        status.innerText = 'Automático';
+        status.style.color = '#f7b500';
+        calcTotal();
+      }}
+    }}
     function toggleProd(id){{
       const el=document.getElementById('item-'+id);
       const chk=document.getElementById('chk-'+id);
@@ -372,6 +378,7 @@ def nova_os():
       calcTotal();
     }}
     function calcTotal(){{
+      if(modoManual) return;
       let t=parseFloat(document.getElementById('valor_mao').value)||0;
       document.querySelectorAll('.produto-item.selected').forEach(item=>{{
         const id=item.id.replace('item-','');
@@ -463,14 +470,40 @@ def editar_servico(id):
         <div class="col-md-3"><label class="small-label">Placa</label><input name="placa" value="{s_placa}" class="form-control bg-dark text-white border-secondary"></div>
         <div class="col-md-3"><label class="small-label">Veículo</label><input name="veiculo" value="{s_veiculo or s_carro or ''}" class="form-control bg-dark text-white border-secondary"></div>
         <div class="col-12"><label class="small-label">O que foi feito</label><textarea name="descricao" rows="3" class="form-control bg-dark text-white border-secondary" required>{s_desc}</textarea></div>
-        <div class="col-md-4"><label class="small-label">Total</label><input id="valor_total" name="valor_total" type="number" step="0.01" value="{s_valor}" class="form-control bg-dark text-white border-secondary" readonly><div id="valor_display" class="small-label mt-1">R$ {float(s_valor or 0):.2f}</div></div>
+        <div class="col-md-6">
+          <label class="small-label d-flex justify-content-between"><span>Total</span> <button type="button" id="btnEditar" onclick="toggleEditar()" class="btn btn-sm py-0 px-2 ms-2" style="background:#f7b500;color:#000;font-weight:800;font-size:11px">✏️ Editar</button> <span id="status_auto" style="color:#f7b500;font-size:11px" class="ms-auto">Automático</span></label>
+          <input id="valor_total" name="valor_total" type="number" step="0.01" value="{s_valor}" class="form-control bg-dark text-white border-secondary" readonly style="border-color:#f7b500!important;font-weight:bold">
+          <div id="valor_display" class="small-label mt-1">R$ {float(s_valor or 0):.2f}</div>
+        </div>
       </div>
       <div class="mt-4"><label class="small-label fw-bold">Produtos usados</label><div class="mt-2" style="max-height:380px;overflow-y:auto">{lista_prod_html}</div></div>
-      <button class="btn btn-yellow w-100 py-3 mt-4">SALVAR EDIÇÃO</button>
+      <button class="btn btn-yellow w-100 py-3 mt-4">SALVAR EDIÇÃO - <span id="valor_display2">R$ {float(s_valor or 0):.2f}</span></button>
       <a href="/historico" class="btn btn-dark2 w-100 mt-2">Cancelar</a>
     </form>
     </div>
     <script>
+    let modoManual = true;
+    function toggleEditar(){{
+      modoManual =!modoManual;
+      const input = document.getElementById('valor_total');
+      const btn = document.getElementById('btnEditar');
+      const status = document.getElementById('status_auto');
+      if(modoManual){{
+        input.removeAttribute('readonly');
+        input.classList.add('total-editavel');
+        input.focus();
+        btn.innerText = '🔒 Auto';
+        status.innerText = 'Editando manualmente';
+        status.style.color = '#22c55e';
+      }} else {{
+        input.setAttribute('readonly','readonly');
+        input.classList.remove('total-editavel');
+        btn.innerText = '✏️ Editar';
+        status.innerText = 'Automático';
+        status.style.color = '#f7b500';
+        calcTotal();
+      }}
+    }}
     function toggleProd(id){{
       const el=document.getElementById('item-'+id);
       const chk=document.getElementById('chk-'+id);
@@ -485,6 +518,7 @@ def editar_servico(id):
       let v=parseInt(inp.value)||1; v+=delta; if(v<1) v=1; inp.value=v; calcTotal();
     }}
     function calcTotal(){{
+      if(modoManual) return;
       let t=0;
       document.querySelectorAll('.produto-item.selected').forEach(item=>{{
         const id=item.id.replace('item-','');
@@ -493,8 +527,12 @@ def editar_servico(id):
         t+=preco*qty;
       }});
       document.getElementById('valor_total').value=t.toFixed(2);
+      const vd=document.getElementById('valor_display');
+      if(vd) vd.innerText='R$ '+t.toFixed(2);
+      const vd2=document.getElementById('valor_display2');
+      if(vd2) vd2.innerText='R$ '+t.toFixed(2);
     }}
-    calcTotal();
+    // no editar já começa em modo manual pra você poder editar, se quiser auto clica no botão
     </script>
     """
     return render_template_string(BASE, content=html)
@@ -506,7 +544,7 @@ def historico():
     servicos = buscar_servicos(q)
     linhas=""
     for s in servicos:
-        linhas+=f"<tr><td>{s['data']}</td><td><b>{s['cliente']}</b><br><span class='small-label'>{s['veiculo']} {s['placa']}</span></td><td>{s['descricao']}<br><span class='small-label' style='color:#f7b500'>{s['prod']}</span></td><td>R$ {float(s['valor'] or 0):.2f}</td><td><a href='/imprimir/{s['id']}' target='_blank' class='btn btn-sm btn-dark2'>🖨️</a> <a href='/editar_servico/{s['id']}' class='btn btn-sm btn-dark2'>✏️</a> <a href='/excluir_servico/{s['id']}' class='btn btn-sm btn-danger'>🗑️</a></td></tr>"
+        linhas+=f"<tr><td>{s['data']}</td><td><b>{s['cliente']}</b><br><span class='small-label'>{s['veiculo']} {s['placa']}</span></td><td style='white-space:pre-wrap'>{s['descricao']}<br><span class='small-label' style='color:#f7b500'>{s['prod']}</span></td><td style='white-space:nowrap'>R$ {float(s['valor'] or 0):.2f}</td><td><a href='/imprimir/{s['id']}' target='_blank' class='btn btn-sm btn-dark2'>🖨️</a> <a href='/editar_servico/{s['id']}' class='btn btn-sm btn-dark2'>✏️</a> <a href='/excluir_servico/{s['id']}' class='btn btn-sm btn-danger'>🗑️</a></td></tr>"
     html = f"""
     <div class="card-dark p-4">
     <div class="d-flex justify-content-between align-items-center mb-3"><h5 class="fw-bold m-0">Histórico</h5><div class="d-flex gap-2"><a href="/exportar_excel" class="btn btn-yellow btn-sm">📊 Excel OS</a><a href="/exportar_produtos" class="btn btn-dark2 btn-sm">📦 Excel Produtos</a></div></div>
@@ -530,11 +568,11 @@ def exportar_excel():
         bio = BytesIO()
         wb.save(bio)
         bio.seek(0)
-        return send_file(bio, as_attachment=True, download_name=f"oficina_{datetime.now().strftime('%d-%m-%Y')}.xlsx", mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        return send_file(bio, as_attachment=True, download_name=f"oficina_{datetime.now(ZoneInfo('America/Sao_Paulo')).strftime('%d-%m-%Y')}.xlsx", mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     except:
-        output = "Data,Cliente,Placa,Veiculo,Descricao,Produtos,Valor\n"
+        output = "Data,Cliente,Placa,Veiculo,Descricao,Produtos,Valor\\n"
         for s in servicos:
-            output += f"\"{s['data']}\",\"{s['cliente']}\",\"{s['placa']}\",\"{s['veiculo']}\",\"{s['descricao']}\",\"{s['prod']}\",{s['valor']}\n"
+            output += f"\\"{s['data']}\\",\\"{s['cliente']}\\",\\"{s['placa']}\\",\\"{s['veiculo']}\\",\\"{s['descricao']}\\",\\"{s['prod']}\\",{s['valor']}\\n"
         bio = BytesIO(output.encode('utf-8'))
         return send_file(bio, as_attachment=True, download_name="oficina.csv", mimetype="text/csv")
 
@@ -557,7 +595,7 @@ def exportar_produtos():
     bio = BytesIO()
     wb.save(bio)
     bio.seek(0)
-    return send_file(bio, as_attachment=True, download_name=f"produtos_oficina_{datetime.now().strftime('%d-%m-%Y')}.xlsx", mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    return send_file(bio, as_attachment=True, download_name=f"produtos_oficina_{datetime.now(ZoneInfo('America/Sao_Paulo')).strftime('%d-%m-%Y')}.xlsx", mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 @app.route('/imprimir/<int:id>')
 def imprimir(id):
