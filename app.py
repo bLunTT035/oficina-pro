@@ -1,5 +1,5 @@
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from flask import Flask, render_template_string, request, redirect, send_file
 import sqlite3
@@ -30,12 +30,14 @@ def init_db():
     if USE_POSTGRES:
         cur.execute('CREATE TABLE IF NOT EXISTS produtos (id SERIAL PRIMARY KEY, nome TEXT, preco REAL, estoque INTEGER)')
         cur.execute('CREATE TABLE IF NOT EXISTS servicos (id SERIAL PRIMARY KEY, cliente TEXT, carro TEXT, descricao TEXT, valor REAL, data TEXT, placa TEXT, veiculo TEXT, produtos_usados TEXT)')
+        cur.execute('CREATE TABLE IF NOT EXISTS despesas (id SERIAL PRIMARY KEY, nome TEXT, categoria TEXT, valor REAL, data TEXT)')
         for col in ["cliente","carro","placa","veiculo","descricao","valor","data","produtos_usados"]:
             try: cur.execute(f'ALTER TABLE servicos ADD COLUMN IF NOT EXISTS {col} TEXT')
             except: pass
     else:
         cur.execute('CREATE TABLE IF NOT EXISTS produtos (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT, preco REAL, estoque INTEGER)')
         cur.execute('CREATE TABLE IF NOT EXISTS servicos (id INTEGER PRIMARY KEY AUTOINCREMENT, cliente TEXT, placa TEXT, veiculo TEXT, carro TEXT, descricao TEXT, valor REAL, data TEXT, produtos_usados TEXT)')
+        cur.execute('CREATE TABLE IF NOT EXISTS despesas (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT, categoria TEXT, valor REAL, data TEXT)')
     conn.commit()
     conn.close()
 
@@ -60,6 +62,12 @@ def buscar_servicos(filtro=""):
         lista.append({"id":id_, "cliente":cliente or "", "placa":placa or "", "veiculo":veiculo or carro or "", "descricao":descricao or "", "valor":valor or 0, "data":data or "", "prod":prod or ""})
     return lista
 
+def parse_data_os(data_str):
+    try:
+        return datetime.strptime(data_str.split()[0], "%d/%m/%Y")
+    except:
+        return datetime.now()
+
 BASE = """
 <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Oficina PRO</title>
@@ -81,6 +89,10 @@ body{background:#0e0e0e;color:#fff;font-family:Inter,Arial}
 .qty-box{display:none; align-items:center; gap:6px;}
 .qty-box input{width:55px; text-align:center; background:#000; border:1px solid #f7b500; color:#f7b500; font-weight:900; border-radius:6px; padding:4px;}
 .qty-btn{background:#f7b500; color:#000; border:none; width:28px; height:28px; border-radius:6px; font-weight:900;}
+.stat-yellow{border-top:4px solid #f7b500}
+.stat-green{border-top:4px solid #22c55e}
+.stat-red{border-top:4px solid #ef4444}
+.stat-white{border-top:4px solid #fff}
 </style>
 </head><body>
 <nav class="navbar d-flex justify-content-between">
@@ -88,6 +100,7 @@ body{background:#0e0e0e;color:#fff;font-family:Inter,Arial}
 <div class="d-flex gap-2 flex-wrap">
 <a href="/" class="btn btn-dark2 btn-sm">Início</a>
 <a href="/produtos" class="btn btn-dark2 btn-sm">Produtos</a>
+<a href="/despesas" class="btn btn-dark2 btn-sm" style="border:1px solid #ef4444;">💸 Despesas</a>
 <a href="/historico" class="btn btn-dark2 btn-sm">Histórico</a>
 <a href="/exportar_excel" class="btn btn-dark2 btn-sm">Excel OS</a>
 <a href="/exportar_produtos" class="btn btn-dark2 btn-sm">Excel Produtos</a>
@@ -108,21 +121,85 @@ def index():
     except: faturado=0
     try: cur.execute("SELECT COUNT(*) FROM produtos"); total_prod = cur.fetchone()[0]
     except: total_prod=0
+    try: cur.execute("SELECT COALESCE(SUM(valor),0) FROM despesas"); total_desp = cur.fetchone()[0] or 0
+    except: total_desp=0
     conn.close()
-    servicos = buscar_servicos()[:8]
+    hoje_str = datetime.now(ZoneInfo("America/Sao_Paulo")).strftime("%d/%m/%Y")
+    servicos_todos = buscar_servicos()
+    total_hoje = sum(float(s['valor'] or 0) for s in servicos_todos if hoje_str in s['data'])
+    inicio_semana = datetime.now() - timedelta(days=datetime.now().weekday())
+    total_semana = 0
+    for s in servicos_todos:
+        try:
+            d = parse_data_os(s['data'])
+            if d >= inicio_semana:
+                total_semana += float(s['valor'] or 0)
+        except: pass
+    lucro = float(faturado or 0) - float(total_desp or 0)
+    servicos = servicos_todos[:8]
     linhas=""
     for s in servicos:
         linhas+=f"<tr><td>{s['data']}</td><td><b>{s['cliente']}</b><br><span class='small-label'>{s['veiculo']} {s['placa']}</span></td><td>{s['descricao']}<br><span class='small-label' style='color:#f7b500'>{s['prod']}</span></td><td>R$ {float(s['valor']):.2f}</td><td><a href='/imprimir/{s['id']}' target='_blank' class='btn btn-sm btn-dark2'>🖨️</a> <a href='/editar_servico/{s['id']}' class='btn btn-sm btn-dark2'>✏️</a> <a href='/excluir_servico/{s['id']}' class='btn btn-sm btn-danger'>🗑️</a></td></tr>"
     html = f"""
+    <div class="row g-3 mb-3">
+      <div class="col-6 col-md-3"><div class="card-dark p-3 stat-green"><div class="small-label">HOJE ({hoje_str})</div><div class="big-number" style="color:#22c55e;">R$ {float(total_hoje):.2f}</div></div></div>
+      <div class="col-6 col-md-3"><div class="card-dark p-3 stat-yellow"><div class="small-label">ESSA SEMANA</div><div class="big-number" style="color:#f7b500;">R$ {float(total_semana):.2f}</div></div></div>
+      <div class="col-6 col-md-3"><div class="card-dark p-3 stat-red"><div class="small-label">DESPESAS MÊS</div><div class="big-number" style="color:#ef4444;">R$ {float(total_desp):.2f}</div></div></div>
+      <div class="col-6 col-md-3"><div class="card-dark p-3 stat-white"><div class="small-label">LUCRO LÍQUIDO</div><div class="big-number" style="color:{'#22c55e' if lucro>=0 else '#ef4444'};">R$ {lucro:.2f}</div></div></div>
+    </div>
     <div class="row g-3">
-      <div class="col-6"><div class="card-dark p-4"><div class="big-number">{total_serv}</div><div class="small-label mt-2">Serviços</div></div></div>
-      <div class="col-6"><div class="card-dark p-4"><div class="big-number">R$ {float(faturado):.2f}</div><div class="small-label mt-2">Faturado</div></div></div>
-      <div class="col-6"><div class="card-dark p-4"><div class="big-number">{total_prod}</div><div class="small-label mt-2">Produtos</div></div></div>
-      <div class="col-6"><div class="card-dark p-4 d-flex flex-column gap-2"><a href="/nova_os" class="btn btn-yellow w-100 py-3">+ REGISTRAR SERVIÇO</a><div class="d-flex gap-2"><a href="/exportar_excel" class="btn btn-dark2 w-50">📊 Excel OS</a><a href="/exportar_produtos" class="btn btn-dark2 w-50">📦 Excel Produtos</a></div></div></div>
+      <div class="col-4"><div class="card-dark p-3"><div class="big-number">{total_serv}</div><div class="small-label">Serviços</div></div></div>
+      <div class="col-4"><div class="card-dark p-3"><div class="big-number">R$ {float(faturado):.2f}</div><div class="small-label">Faturado Total</div></div></div>
+      <div class="col-4"><div class="card-dark p-3"><div class="big-number">{total_prod}</div><div class="small-label">Produtos</div></div></div>
+    </div>
+    <div class="card-dark p-3 mt-3 d-flex gap-2">
+      <a href="/nova_os" class="btn btn-yellow w-50 py-3">+ REGISTRAR SERVIÇO</a>
+      <a href="/despesas" class="btn btn-dark2 w-50 py-3" style="border:1px solid #ef4444;">💸 LANÇAR DESPESA</a>
     </div>
     <div class="card-dark p-4 mt-4">
       <h6 class="fw-bold mb-3">Últimos Serviços</h6>
       <table class="table"><thead><tr><th>Data</th><th>Cliente</th><th>Feito</th><th>Valor</th><th>Ações</th></tr></thead><tbody>{linhas if linhas else '<tr><td colspan=5 class=small-label>Nenhum serviço</td></tr>'}</tbody></table>
+    </div>
+    """
+    return render_template_string(BASE, content=html)
+
+@app.route('/despesas', methods=['GET','POST'])
+def despesas():
+    init_db()
+    conn = get_conn(); cur = conn.cursor()
+    if request.method=='POST':
+        if request.form.get('acao')=='excluir':
+            idd = request.form.get('id')
+            if USE_POSTGRES: cur.execute("DELETE FROM despesas WHERE id=%s", (idd,))
+            else: cur.execute("DELETE FROM despesas WHERE id=?", (idd,))
+        else:
+            nome=request.form.get('nome'); cat=request.form.get('categoria'); valor=request.form.get('valor'); data=request.form.get('data') or datetime.now(ZoneInfo("America/Sao_Paulo")).strftime("%d/%m/%Y")
+            if USE_POSTGRES: cur.execute("INSERT INTO despesas (nome,categoria,valor,data) VALUES (%s,%s,%s,%s)", (nome,cat,valor,data))
+            else: cur.execute("INSERT INTO despesas (nome,categoria,valor,data) VALUES (?,?,?,?)", (nome,cat,valor,data))
+        conn.commit(); conn.close(); return redirect('/despesas')
+    cur.execute("SELECT * FROM despesas ORDER BY id DESC"); rows = cur.fetchall()
+    try: cur.execute("SELECT COALESCE(SUM(valor),0) FROM despesas"); total=cur.fetchone()[0] or 0
+    except: total=0
+    conn.close()
+    linhas=""
+    for r in rows:
+        if USE_POSTGRES: id_, nome, cat, val, data = r[0], r[1], r[2], r[3], r[4]
+        else: id_=r['id']; nome=r['nome']; cat=r['categoria']; val=r['valor']; data=r['data']
+        linhas+=f"<tr><td>{data}</td><td><span class='badge bg-dark' style='border:1px solid #555'>{cat}</span> {nome}</td><td style='color:#ef4444; font-weight:800;'>R$ {float(val or 0):.2f}</td><td><form method='POST'><input type='hidden' name='acao' value='excluir'><input type='hidden' name='id' value='{id_}'><button class='btn btn-sm btn-danger'>X</button></form></td></tr>"
+    html=f"""
+    <div class="card-dark p-4">
+      <h5 class="fw-bold mb-3">💸 Lançar Despesa</h5>
+      <form method="POST" class="row g-2">
+        <div class="col-md-4"><input name="nome" class="form-control bg-dark text-white border-secondary" placeholder="Ex: Aluguel, Luz, Compra peça" required></div>
+        <div class="col-md-2"><select name="categoria" class="form-select bg-dark text-white border-secondary"><option>Aluguel</option><option>Peças</option><option>Luz/Água</option><option>Outros</option></select></div>
+        <div class="col-md-2"><input name="valor" type="number" step="0.01" class="form-control bg-dark text-white border-secondary" placeholder="R$" required></div>
+        <div class="col-md-2"><input name="data" class="form-control bg-dark text-white border-secondary" value="{datetime.now(ZoneInfo('America/Sao_Paulo')).strftime('%d/%m/%Y')}"></div>
+        <div class="col-md-2"><button class="btn btn-yellow w-100">+ Add</button></div>
+      </form>
+    </div>
+    <div class="card-dark p-4 mt-3">
+      <h6 class="fw-bold">Total Despesas: <span style="color:#ef4444;">R$ {float(total):.2f}</span></h6>
+      <table class="table mt-3"><thead><tr><th>Data</th><th>Despesa</th><th>Valor</th><th></th></tr></thead><tbody>{linhas if linhas else '<tr><td colspan=4 class=small-label>Nenhuma despesa</td></tr>'}</tbody></table>
     </div>
     """
     return render_template_string(BASE, content=html)
@@ -147,67 +224,52 @@ def produtos():
                         break
                 if sheet is None:
                     sheet = wb.active
-
                 headers = {}
                 for c in range(1, sheet.max_column+1):
                     val = str(sheet.cell(1, c).value or '').lower().strip()
                     headers[val] = c
-
                 def find_col(names):
                     for n in names:
                         for h, col in headers.items():
                             if n in h:
                                 return col
                     return None
-
                 c_prod = find_col(['produto','nome','descricao','descrição','item'])
                 c_preco = find_col(['valor revenda','revenda','preco','preço','valor','price'])
                 c_est = find_col(['estoque','qtd','quantidade','colunas1','saldo','est'])
-
                 if not c_prod: c_prod = 1
                 if not c_preco: c_preco = 2
-
                 count = 0
                 for r in range(2, sheet.max_row+1):
                     nome = str(sheet.cell(r, c_prod).value or '').strip()
                     if not nome or nome.lower() in ['none','nan',''] or 'total' in nome.lower():
                         continue
-                    try:
-                        preco = float(sheet.cell(r, c_preco).value or 0)
-                    except:
-                        preco = 0.0
-                    try:
-                        estoque = int(float(sheet.cell(r, c_est).value or 0)) if c_est else 0
-                    except:
-                        estoque = 0
+                    try: preco = float(sheet.cell(r, c_preco).value or 0)
+                    except: preco = 0.0
+                    try: estoque = int(float(sheet.cell(r, c_est).value or 0)) if c_est else 0
+                    except: estoque = 0
                     if preco <= 0 and estoque <= 0:
                         continue
-
                     if USE_POSTGRES:
                         cur.execute("SELECT id FROM produtos WHERE UPPER(nome)=UPPER(%s)", (nome,))
                     else:
                         cur.execute("SELECT id FROM produtos WHERE UPPER(nome)=UPPER(?)", (nome,))
                     existe = cur.fetchone()
                     if existe:
-                        if USE_POSTGRES:
-                            cur.execute("UPDATE produtos SET preco=%s, estoque=%s WHERE UPPER(nome)=UPPER(%s)", (preco, estoque, nome))
-                        else:
-                            cur.execute("UPDATE produtos SET preco=?, estoque=? WHERE UPPER(nome)=UPPER(?)", (preco, estoque, nome))
+                        if USE_POSTGRES: cur.execute("UPDATE produtos SET preco=%s, estoque=%s WHERE UPPER(nome)=UPPER(%s)", (preco, estoque, nome))
+                        else: cur.execute("UPDATE produtos SET preco=?, estoque=? WHERE UPPER(nome)=UPPER(?)", (preco, estoque, nome))
                     else:
-                        if USE_POSTGRES:
-                            cur.execute("INSERT INTO produtos (nome, preco, estoque) VALUES (%s,%s,%s)", (nome, preco, estoque))
-                        else:
-                            cur.execute("INSERT INTO produtos (nome, preco, estoque) VALUES (?,?,?)", (nome, preco, estoque))
+                        if USE_POSTGRES: cur.execute("INSERT INTO produtos (nome, preco, estoque) VALUES (%s,%s,%s)", (nome, preco, estoque))
+                        else: cur.execute("INSERT INTO produtos (nome, preco, estoque) VALUES (?,?,?)", (nome, preco, estoque))
                         count+=1
                 conn.commit()
-                msg = f"<div class='alert alert-success'>✅ {count} produtos novos importados! {sheet.max_row-1} linhas lidas. Produtos existentes foram atualizados.</div>"
+                msg = f"<div class='alert alert-success'>✅ {count} produtos novos importados! {sheet.max_row-1} linhas lidas.</div>"
             except Exception as e:
                 msg = f"<div class='alert alert-danger'>❌ Erro ao importar: {e}</div>"
         else:
             if USE_POSTGRES: cur.execute("INSERT INTO produtos (nome, preco, estoque) VALUES (%s,%s,%s)", (request.form['nome'], request.form['preco'], request.form['estoque']))
             else: cur.execute("INSERT INTO produtos (nome, preco, estoque) VALUES (?,?,?)", (request.form['nome'], request.form['preco'], request.form['estoque']))
             conn.commit(); conn.close(); return redirect('/produtos')
-
     cur.execute("SELECT * FROM produtos ORDER BY id DESC"); rows = cur.fetchall(); conn.close()
     linhas=""
     for r in rows:
@@ -223,12 +285,10 @@ def produtos():
       <div class="col-md-2"><input name="estoque" type="number" class="form-control bg-dark text-white border-secondary" placeholder="Est" required></div>
       <div class="col-md-2"><button class="btn btn-yellow w-100">+ Add</button></div>
     </form>
-
     <div class="row g-2 mb-4">
       <div class="col-md-6">
         <div style="background:#1a1a00; border:2px dashed #f7b500; padding:12px; border-radius:10px">
           <h6 class="fw-bold" style="color:#f7b500">📥 Importar Planilha</h6>
-          <p class="small-label">Use sua PLANILHA_OFICINA_CERTA.xlsx - lê PRODUTO / VALOR REVENDA / ESTOQUE automaticamente</p>
           <form method="POST" enctype="multipart/form-data" class="d-flex gap-2">
             <input type="file" name="arquivo" accept=".xlsx,.xls" class="form-control bg-dark text-white border-secondary" required>
             <button class="btn btn-yellow">IMPORTAR</button>
@@ -237,13 +297,11 @@ def produtos():
       </div>
       <div class="col-md-6">
         <div style="background:#0a1a0a; border:2px dashed #22c55e; padding:12px; border-radius:10px">
-          <h6 class="fw-bold" style="color:#22c55e">📤 Exportar Planilha</h6>
-          <p class="small-label">Baixa todos os {len(rows)} produtos em Excel para backup</p>
-          <a href="/exportar_produtos" class="btn w-100" style="background:#22c55e; color:black; font-weight:800">📊 BAIXAR EXCEL PRODUTOS</a>
+          <h6 class="fw-bold" style="color:#22c55e">📤 Exportar</h6>
+          <a href="/exportar_produtos" class="btn w-100" style="background:#22c55e; color:black; font-weight:800">📊 BAIXAR EXCEL</a>
         </div>
       </div>
     </div>
-
     <table class="table"><thead><tr><th>Nome</th><th>Preço</th><th>Est</th><th>Ações</th></tr></thead><tbody>{linhas if linhas else '<tr><td colspan=4 class=small-label>Nenhum produto ainda</td></tr>'}</tbody></table>
     </div>
     """
@@ -510,20 +568,12 @@ def editar_servico(id):
       const btn = document.getElementById('btnEditar');
       const disp = document.getElementById('valor_display');
       if(modoManual){{
-        input.removeAttribute('readonly');
-        input.style.borderColor='#22c55e';
-        input.style.color='#22c55e';
-        input.focus();
-        btn.innerText='🔒 Auto';
-        btn.style.background='#22c55e';
-        disp.innerText='✏️ Editando manualmente - digite o valor';
-        disp.style.color='#22c55e';
+        input.removeAttribute('readonly'); input.style.borderColor='#22c55e'; input.style.color='#22c55e'; input.focus();
+        btn.innerText='🔒 Auto'; btn.style.background='#22c55e';
+        disp.innerText='✏️ Editando manualmente - digite o valor'; disp.style.color='#22c55e';
       }} else {{
-        input.setAttribute('readonly','readonly');
-        input.style.borderColor='#f7b500';
-        input.style.color='#fff';
-        btn.innerText='✏️ Editar';
-        btn.style.background='#f7b500';
+        input.setAttribute('readonly','readonly'); input.style.borderColor='#f7b500'; input.style.color='#fff';
+        btn.innerText='✏️ Editar'; btn.style.background='#f7b500';
         calcTotal();
       }}
     }}
@@ -564,11 +614,16 @@ def historico():
     servicos = buscar_servicos(q)
     linhas=""
     for s in servicos:
-        linhas+=f"<tr><td>{s['data']}</td><td><b>{s['cliente']}</b><br><span class='small-label'>{s['veiculo']} {s['placa']}</span></td><td>{s['descricao']}<br><span class='small-label' style='color:#f7b500'>{s['prod']}</span></td><td>R$ {float(s['valor'] or 0):.2f}</td><td><a href='/imprimir/{s['id']}' target='_blank' class='btn btn-sm btn-dark2'>🖨️</a> <a href='/editar_servico/{s['id']}' class='btn btn-sm btn-dark2'>✏️</a> <a href='/excluir_servico/{s['id']}' class='btn btn-sm btn-danger'>🗑️</a></td></tr>"
+        try:
+            d = parse_data_os(s['data'])
+            dias = (datetime.now() - d).days
+            alerta = f"<span class='badge bg-danger ms-1'>SUMIDO {dias}d</span>" if dias>=60 else ""
+        except: alerta=""
+        linhas+=f"<tr><td>{s['data']} {alerta}</td><td><b>{s['cliente']}</b><br><span class='small-label'>{s['veiculo']} {s['placa']}</span></td><td>{s['descricao']}<br><span class='small-label' style='color:#f7b500'>{s['prod']}</span></td><td>R$ {float(s['valor'] or 0):.2f}</td><td><a href='/imprimir/{s['id']}' target='_blank' class='btn btn-sm btn-dark2'>🖨️</a> <a href='/editar_servico/{s['id']}' class='btn btn-sm btn-dark2'>✏️</a> <a href='/excluir_servico/{s['id']}' class='btn btn-sm btn-danger'>🗑️</a></td></tr>"
     html = f"""
     <div class="card-dark p-4">
     <div class="d-flex justify-content-between align-items-center mb-3"><h5 class="fw-bold m-0">Histórico</h5><div class="d-flex gap-2"><a href="/exportar_excel" class="btn btn-yellow btn-sm">📊 Excel OS</a><a href="/exportar_produtos" class="btn btn-dark2 btn-sm">📦 Excel Produtos</a></div></div>
-    <form method="GET" class="mb-3"><div class="input-group"><input name="q" value="{q}" class="form-control bg-dark text-white border-secondary" placeholder="Pesquisar..."><button class="btn btn-yellow">Buscar</button></div></form>
+    <form method="GET" class="mb-3"><div class="input-group"><input name="q" value="{q}" class="form-control bg-dark text-white border-secondary" placeholder="Pesquisar cliente, placa..."><button class="btn btn-yellow">Buscar</button></div></form>
     <table class="table"><thead><tr><th>Data</th><th>Cliente</th><th>Feito</th><th>Valor</th><th>Ações</th></tr></thead><tbody>{linhas if linhas else '<tr><td colspan=5 class=small-label>Nenhum resultado</td></tr>'}</tbody></table>
     </div>
     """
